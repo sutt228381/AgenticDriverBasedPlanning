@@ -7,7 +7,10 @@ import requests
 import pandas as pd
 import streamlit as st
 
-APP_TITLE = "Agentic Driver-Based Planning — Full MVP v1"
+# =============================
+# CONFIG
+# =============================
+APP_TITLE = "Agentic Driver-Based Planning — Grid Input v2"
 SHEET_NAME = "AgenticPlanner"
 TAB_PRIOR = "prior_year"
 TAB_INPUT = "forecast_input"
@@ -15,6 +18,54 @@ TAB_SCENARIOS = "scenarios"
 DEFAULT_ENTITY = "Orvis"
 DEFAULT_CURRENCY = "USD"
 
+# Grid helpers
+MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+DRIVER_CHOICES = [
+    "MANUAL",
+    "PCT_GROWTH",
+    "PCT_OF_SALES",
+    "PY_RATIO_SALES",
+    "CPI_INDEXED",
+    "OIL_LINKED_FREIGHT",
+    "FX_CONVERTED_SALES",
+]
+
+def to_wide_input(long_df: pd.DataFrame) -> pd.DataFrame:
+    base = long_df.copy()
+    for c in ["Account","Period","Driver","Param","Value"]:
+        if c not in base.columns:
+            base[c] = "" if c != "Value" else 0.0
+    base["Value"] = pd.to_numeric(base["Value"], errors="coerce").fillna(0.0)
+    piv = base.pivot_table(
+        index=["Account","Driver","Param"],
+        columns="Period",
+        values="Value",
+        aggfunc="sum",
+    ).reindex(columns=MONTHS, fill_value=0.0).reset_index()
+    ordered = ["Account","Driver","Param"] + MONTHS
+    piv = piv.reindex(columns=ordered)
+    return piv
+
+def to_long_input(wide_df: pd.DataFrame) -> pd.DataFrame:
+    keep = ["Account","Driver","Param"]
+    for k in keep:
+        if k not in wide_df.columns:
+            wide_df[k] = ""
+    val_cols = [c for c in wide_df.columns if c in MONTHS]
+    melted = wide_df.melt(
+        id_vars=keep,
+        value_vars=val_cols,
+        var_name="Period",
+        value_name="Value",
+    )
+    melted["Value"] = pd.to_numeric(melted["Value"], errors="coerce").fillna(0.0)
+    cols = ["Account","Period","Driver","Param","Value"]
+    melted = melted.reindex(columns=cols)
+    return melted
+
+# =============================
+# OPTIONAL: Google Sheets
+# =============================
 @st.cache_resource(show_spinner=False)
 def get_gspread_client():
     try:
@@ -62,12 +113,15 @@ def write_sheet_df(worksheet, df: pd.DataFrame):
     worksheet.clear()
     worksheet.update([df.columns.values.tolist()] + df.astype(str).values.tolist())
 
+# =============================
+# External Drivers (cached)
+# =============================
 @st.cache_data(ttl=3600)
-def fetch_cpi_yoy():
+def fetch_cpi_yoy() -> Tuple[float, str]:
     return 0.022, "CPI YoY (demo) = 2.2%"
 
 @st.cache_data(ttl=3600)
-def fetch_fx_rate(base: str, target: str):
+def fetch_fx_rate(base: str, target: str) -> Tuple[float, str]:
     try:
         url = f"https://api.frankfurter.app/latest?from={base}&to={target}"
         resp = requests.get(url, timeout=10)
@@ -80,23 +134,28 @@ def fetch_fx_rate(base: str, target: str):
     return 1.08, f"FX {base}->{target} fallback = 1.08"
 
 @st.cache_data(ttl=3600)
-def fetch_oil_index_ratio(prev_baseline: float = 75.0):
+def fetch_oil_index_ratio(prev_baseline: float = 75.0) -> Tuple[float, str]:
     current = 82.0
     ratio = current / max(prev_baseline, 1.0)
     return ratio, f"Oil index ratio = {current:.1f}/{prev_baseline:.1f} = {ratio:.3f} (demo)"
 
+# =============================
+# Demo seed data
+# =============================
 @st.cache_data
 def demo_prior_year() -> pd.DataFrame:
-    data = [
-        {"Account":"Sales","Period":"Jan","Value":100000},
-        {"Account":"Royalty Income","Period":"Jan","Value":5000},
-        {"Account":"COGS","Period":"Jan","Value":55000},
-        {"Account":"Freight","Period":"Jan","Value":8000},
-        {"Account":"Sales","Period":"Feb","Value":110000},
-        {"Account":"Royalty Income","Period":"Feb","Value":5500},
-        {"Account":"COGS","Period":"Feb","Value":60500},
-        {"Account":"Freight","Period":"Feb","Value":8300},
-    ]
+    data = []
+    for m, sales, royalty, cogs, freight in [
+        ("Jan", 100000, 5000, 55000, 8000),
+        ("Feb", 110000, 5500, 60500, 8300),
+        ("Mar", 105000, 5250, 58000, 8200),
+    ]:
+        data += [
+            {"Account":"Sales","Period":m,"Value":sales},
+            {"Account":"Royalty Income","Period":m,"Value":royalty},
+            {"Account":"COGS","Period":m,"Value":cogs},
+            {"Account":"Freight","Period":m,"Value":freight},
+        ]
     return pd.DataFrame(data)
 
 @st.cache_data
@@ -106,14 +165,22 @@ def demo_forecast_input() -> pd.DataFrame:
         {"Account":"Royalty Income","Period":"Jan","Driver":"PY_RATIO_SALES","Param":"","Value":0},
         {"Account":"COGS","Period":"Jan","Driver":"PCT_GROWTH","Param":"Growth%","Value":0.06},
         {"Account":"Freight","Period":"Jan","Driver":"OIL_LINKED_FREIGHT","Param":"% of Sales","Value":0.07},
+
         {"Account":"Sales","Period":"Feb","Driver":"MANUAL","Param":"Amount","Value":118000},
         {"Account":"Royalty Income","Period":"Feb","Driver":"PY_RATIO_SALES","Param":"","Value":0},
         {"Account":"COGS","Period":"Feb","Driver":"PCT_GROWTH","Param":"Growth%","Value":0.05},
         {"Account":"Freight","Period":"Feb","Driver":"OIL_LINKED_FREIGHT","Param":"% of Sales","Value":0.07},
+
+        {"Account":"Sales","Period":"Mar","Driver":"MANUAL","Param":"Amount","Value":119500},
+        {"Account":"Royalty Income","Period":"Mar","Driver":"PY_RATIO_SALES","Param":"","Value":0},
+        {"Account":"COGS","Period":"Mar","Driver":"PCT_GROWTH","Param":"Growth%","Value":0.05},
+        {"Account":"Freight","Period":"Mar","Driver":"OIL_LINKED_FREIGHT","Param":"% of Sales","Value":0.07},
     ]
     return pd.DataFrame(data)
 
-from dataclasses import dataclass
+# =============================
+# Agentic Context & engine
+# =============================
 @dataclass
 class Context:
     entity: str
@@ -145,7 +212,7 @@ def agent_recalculate(prior_df: pd.DataFrame, input_df: pd.DataFrame, ctx: Conte
                     pass
         return float(py.loc["Sales", period]) if ("Sales" in py.index and period in py.columns) else 0.0
 
-    outputs = []
+    outputs: List[Dict] = []
     for _, row in input_df.iterrows():
         acc = str(row.get("Account",""))
         per = str(row.get("Period",""))
@@ -178,9 +245,12 @@ def agent_recalculate(prior_df: pd.DataFrame, input_df: pd.DataFrame, ctx: Conte
         outputs.append({"Account": acc, "Period": per, "Value": round(val, 2), "Source": src})
     return pd.DataFrame(outputs)
 
+# =============================
+# UI
+# =============================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
-st.caption("Fuller MVP with additional drivers, scenarios, optional Google Sheets, and explainability.")
+st.caption("Grid-style inputs: Accounts ↓, Periods →, with per-row Driver picklists.")
 
 with st.sidebar:
     st.header("Configuration")
@@ -206,6 +276,7 @@ with st.sidebar:
 
 ctx = Context(entity=entity, currency=currency, cpi_yoy=cpi, fx_eur_to_target=fx_rate, oil_ratio=oil_ratio)
 
+# Load or seed data
 if worksheets:
     try:
         prior_df = read_sheet_df(worksheets[TAB_PRIOR]); 
@@ -223,35 +294,63 @@ else:
 tab1, tab2, tab3 = st.tabs(["Inputs & Results", "Scenarios", "About"])
 
 with tab1:
-    st.subheader("1) Prior Year (reference)"); st.dataframe(prior_df, use_container_width=True)
-    st.subheader("2) Forecast Inputs"); 
-    edited_input = st.data_editor(input_df, use_container_width=True, num_rows="dynamic", key="input_editor")
+    st.subheader("1) Prior Year (reference)")
+    st.dataframe(prior_df, use_container_width=True)
+
+    st.subheader("2) Forecast Inputs (accounts ↓, periods →)")
+    wide_input = to_wide_input(input_df)
+
+    driver_col = st.column_config.SelectboxColumn("Driver", options=DRIVER_CHOICES, help="Choose a driver for this account row")
+    account_col = st.column_config.TextColumn("Account", help="Account name (e.g., Sales, COGS, Freight, Royalty Income)")
+    param_col = st.column_config.TextColumn("Param", help="Label like 'Growth%' or '% of Sales'")
+    num_cols = {m: st.column_config.NumberColumn(m, help=f"Value for {m}", step=1.0, format="%.2f") for m in MONTHS}
+
+    wide_edited = st.data_editor(
+        wide_input,
+        use_container_width=True,
+        num_rows="dynamic",
+        column_config={
+            "Account": account_col,
+            "Driver": driver_col,
+            "Param":  param_col,
+            **num_cols,
+        },
+        key="input_grid",
+    )
+
     colA, colB, colC = st.columns(3)
     with colA:
         if st.button("Recalculate Forecast", type="primary"):
-            st.session_state.pop("explain", None)
-            result = agent_recalculate(prior_df, edited_input, ctx)
+            clear_explain()
+            edited_long = to_long_input(wide_edited)
+            st.session_state["input_editor"] = edited_long
+            result = agent_recalculate(prior_df, edited_long, ctx)
             st.session_state["result_df"] = result
             if worksheets:
-                write_sheet_df(worksheets[TAB_INPUT], edited_input)
+                write_sheet_df(worksheets[TAB_INPUT], edited_long)
                 snap = result.copy(); snap["ScenarioName"] = f"Run {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 try:
                     scen_df = read_sheet_df(worksheets[TAB_SCENARIOS])
                     comb = pd.concat([scen_df, snap], ignore_index=True) if not scen_df.empty else snap
                     write_sheet_df(worksheets[TAB_SCENARIOS], comb)
-                except Exception: pass
+                except Exception:
+                    pass
     with colB:
-        if st.button("Reset Explanations"): st.session_state.pop("explain", None)
+        if st.button("Reset Explanations"):
+            clear_explain()
     with colC:
         if st.button("Restore Demo Inputs"):
-            demo = demo_forecast_input(); st.session_state["input_editor"] = demo
+            demo = demo_forecast_input()
+            st.session_state["input_editor"] = demo
+            st.experimental_rerun()
 
     st.subheader("3) Recalculated Forecast")
     result_df = st.session_state.get("result_df")
     if result_df is not None:
         st.dataframe(result_df, use_container_width=True)
         by_acc = result_df.groupby("Account")["Value"].sum().reset_index()
-        st.caption("Totals by Account (current run)"); st.dataframe(by_acc, use_container_width=True)
+        st.caption("Totals by Account (current run)")
+        st.dataframe(by_acc, use_container_width=True)
     else:
         st.info("Click 'Recalculate Forecast' to compute results.")
 
@@ -265,7 +364,7 @@ with tab2:
         try:
             scen_df = read_sheet_df(worksheets[TAB_SCENARIOS])
             if not scen_df.empty:
-                st.dataframe(scen_df.tail(200), use_container_width=True)
+                st.dataframe(scen_df.tail(300), use_container_width=True)
                 names = sorted(list(set(scen_df["ScenarioName"])))
                 pick = st.selectbox("Compare scenario to current:", options=["(none)"] + names, index=0)
                 if pick != "(none)" and st.session_state.get("result_df") is not None:
