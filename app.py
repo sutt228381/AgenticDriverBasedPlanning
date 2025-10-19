@@ -1,18 +1,13 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
-
+from typing import Tuple, Optional
 import requests
 import pandas as pd
 import streamlit as st
 
-APP_TITLE = "Agentic Driver-Based Planning — P&L Grid v8 (Hierarchy + Single Grid)"
-SHEET_NAME = "AgenticPlanner"
-TAB_PRIOR = "prior_year"
-TAB_INPUT = "forecast_input"
+APP_TITLE = "Agentic Driver-Based Planning — P&L Grid v8.1 (Single Grid In-Place Updates)"
 DEFAULT_ENTITY = "Orvis"
 DEFAULT_CURRENCY = "USD"
-
 MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 ACTUALIZED_PERIODS = ["Jan","Feb","Mar"]
 
@@ -35,33 +30,22 @@ def _norm_period(x:str)->str:
     if s[:3] in MONTH_ALIASES: return MONTH_ALIASES[s[:3]]
     return s[:3].title()
 
-# ---------------- P&L schema ----------------
-# RowType: LINE (editable), SUBTOTAL (read-only, by Type), COMPUTED (read-only)
 ACCOUNT_TYPES = ["Revenue","COGS","Opex","Other","Taxes"]
-
 DEFAULT_LINES = [
-    # Revenue
     {"Account":"Sales","Type":"Revenue","Driver":"MANUAL","Param":"Amount"},
     {"Account":"Returns & Allowances","Type":"Revenue","Driver":"PCT_OF_SALES","Param":"% of Sales"},
     {"Account":"Royalty Income","Type":"Revenue","Driver":"PY_RATIO_SALES","Param":""},
-
-    # COGS
     {"Account":"COGS","Type":"COGS","Driver":"PCT_GROWTH","Param":"Growth%"},
     {"Account":"Freight","Type":"COGS","Driver":"OIL_LINKED_FREIGHT","Param":"% of Sales"},
     {"Account":"Fulfillment","Type":"COGS","Driver":"PCT_OF_SALES","Param":"% of Sales"},
-
-    # Opex (SG&A breakdown)
     {"Account":"Marketing","Type":"Opex","Driver":"PCT_OF_SALES","Param":"% of Sales"},
     {"Account":"Payroll","Type":"Opex","Driver":"CPI_INDEXED","Param":""},
     {"Account":"G&A","Type":"Opex","Driver":"CPI_INDEXED","Param":""},
     {"Account":"Depreciation","Type":"Opex","Driver":"MANUAL","Param":"Amount"},
-
-    # Other & Taxes
     {"Account":"Interest Expense","Type":"Other","Driver":"MANUAL","Param":"Amount"},
     {"Account":"Other Income","Type":"Other","Driver":"MANUAL","Param":"Amount"},
     {"Account":"Taxes","Type":"Taxes","Driver":"MANUAL","Param":"Amount"},
 ]
-
 PRESENTATION_ORDER = [
     ("Revenue", ["Sales","Returns & Allowances","Royalty Income"]),
     ("COGS", ["COGS","Freight","Fulfillment"]),
@@ -69,38 +53,33 @@ PRESENTATION_ORDER = [
     ("Other", ["Other Income","Interest Expense"]),
     ("Taxes", ["Taxes"]),
 ]
-
 COMPUTED_LINES = [
     ("Gross Profit",    lambda sec: sec.get("Revenue",0) - sec.get("COGS",0)),
-    ("EBITDA",          lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0)) - (sec.get("Opex",0) - 0.0)), # Depreciation kept in Opex lines; tweak if you move it
+    ("EBITDA",          lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0)) - (sec.get("Opex",0) - 0.0)),
     ("Operating Income",lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0)) - sec.get("Opex",0)),
     ("Pre-Tax Income",  lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0) - sec.get("Opex",0)) + sec.get("Other",0)),
     ("Net Income",      lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0) - sec.get("Opex",0) + sec.get("Other",0)) - sec.get("Taxes",0)),
 ]
-
 COMP_CHOICES = ["CALC","MANUAL_ADJ","TOTAL"]
 DRIVERS = ["MANUAL","PCT_GROWTH","PCT_OF_SALES","PY_RATIO_SALES","CPI_INDEXED","OIL_LINKED_FREIGHT","FX_CONVERTED_SALES"]
 
-# -------- External drivers (demo/fallbacks) --------
+# ---- External drivers (demo/fallback) ----
 @st.cache_data(ttl=3600)
-def fetch_cpi_yoy()->Tuple[float,str]:
-    return 0.022, "CPI YoY (demo) = 2.2%"
-
+def fetch_cpi_yoy()->Tuple[float,str]: return 0.022, "CPI YoY (demo) = 2.2%"
 @st.cache_data(ttl=3600)
 def fetch_fx_rate(base:str,target:str)->Tuple[float,str]:
     try:
         r=requests.get(f"https://api.frankfurter.app/latest?from={base}&to={target}",timeout=10)
-        if r.ok:
+        if r.ok: 
             rate=float(r.json()["rates"][target]); return rate, f"FX {base}->{target} = {rate:.4f}"
     except Exception: ...
     return 1.08, "FX fallback = 1.08"
-
 @st.cache_data(ttl=3600)
 def fetch_oil_index_ratio(prev=75.0)->Tuple[float,str]:
     cur=82.0; ratio=cur/max(prev,1.0)
     return ratio, f"Oil index ratio = {cur:.1f}/{prev:.1f} = {ratio:.3f} (demo)"
 
-# -------- Demo prior (for actuals Jan–Mar) --------
+# ---- Demo prior (for actuals) ----
 @st.cache_data
 def demo_prior()->pd.DataFrame:
     rows=[]
@@ -118,48 +97,45 @@ def demo_prior()->pd.DataFrame:
         ]
     return pd.DataFrame(rows)
 
-# -------- Unified grid seeding --------
+# ---- Seed unified hierarchical grid ----
 def seed_unified()->pd.DataFrame:
     base=[]
     order=0
     for section, accounts in PRESENTATION_ORDER:
-        # LINE rows
         for acc in accounts:
             meta = next((d for d in DEFAULT_LINES if d["Account"]==acc), None)
-            if meta is None: continue
             for comp in ["CALC","MANUAL_ADJ","TOTAL"]:
                 for m in MONTHS:
                     base.append({
                         "Order": order, "RowType":"LINE",
                         "Type":section, "Account":acc, "Component":comp,
                         "Period":m,
-                        "Driver": meta["Driver"] if comp=="CALC" else "MANUAL",
-                        "Param": meta["Param"]  if comp=="CALC" else "Adj",
+                        "Driver": (meta["Driver"] if comp=="CALC" else "MANUAL"),
+                        "Param":  (meta["Param"]  if comp=="CALC" else "Adj"),
                         "Value":0.0
                     })
             order+=1
-        # SUBTOTAL row (one per section, TOTAL component only)
+        # SUBTOTAL row (TOTAL only)
         for m in MONTHS:
             base.append({
                 "Order": order+0.5, "RowType":"SUBTOTAL", "Type":section, "Account":f"{section} Subtotal",
                 "Component":"TOTAL","Period":m,"Driver":"LOCK","Param":"","Value":0.0
             })
     # COMPUTED rows
-    for name,_ in COMPUTED_LINES:
+    for i,(name,_) in enumerate(COMPUTED_LINES):
         for m in MONTHS:
             base.append({
-                "Order": 999 + list(zip(*COMPUTED_LINES))[0].index(name), "RowType":"COMPUTED", "Type":"Computed",
+                "Order": 900+i, "RowType":"COMPUTED","Type":"Computed",
                 "Account":name,"Component":"TOTAL","Period":m,"Driver":"LOCK","Param":"","Value":0.0
             })
     df=pd.DataFrame(base)
-    # Seed demo Sales CALC Jan–Mar
-    seeds={"Jan":120000,"Feb":118000,"Mar":119500}
-    for m,v in seeds.items():
+    # Seed Sales CALC Jan–Mar
+    for m,v in {"Jan":120000,"Feb":118000,"Mar":119500}.items():
         mask=(df["RowType"]=="LINE")&(df["Account"]=="Sales")&(df["Component"]=="CALC")&(df["Period"]==m)
         df.loc[mask,"Value"]=float(v)
     return df
 
-# -------- Agent engine --------
+# ---- Agent engine ----
 @dataclass
 class Ctx:
     entity:str
@@ -186,27 +162,22 @@ def recalc(df_long: pd.DataFrame, prior_df: pd.DataFrame, ctx: Ctx, actuals_pivo
     df["Period"]=df["Period"].apply(_norm_period)
     py=_pivot_prior(prior_df)
 
-    # Helper for sales base
     def get_sales(period:str)->float:
-        # Prefer TOTAL Sales current df
         m=(df["RowType"]=="LINE")&(df["Account"]=="Sales")&(df["Component"]=="TOTAL")&(df["Period"]==period)
         if m.any(): return float(df.loc[m,"Value"].sum())
-        # else CALC
         m=(df["RowType"]=="LINE")&(df["Account"]=="Sales")&(df["Component"]=="CALC")&(df["Period"]==period)
         if m.any(): return float(df.loc[m,"Value"].sum())
-        # else prior
         try: return float(py.loc[("Sales","Revenue"), period])
         except Exception: return 0.0
 
-    # 1) Compute CALC for LINE rows
-    mask_line_calc = (df["RowType"]=="LINE")&(df["Component"]=="CALC")
-    for idx,row in df[mask_line_calc].iterrows():
+    # 1) CALC for LINE
+    mask_calc=(df["RowType"]=="LINE")&(df["Component"]=="CALC")
+    for idx,row in df[mask_calc].iterrows():
         acc=row["Account"]; typ=row["Type"]; per=row["Period"]
         drv=str(row["Driver"]).upper().strip()
         param=float(row["Value"])
         py_val=float(py.loc[(acc,typ), per]) if (acc,typ) in py.index and per in py.columns else 0.0
 
-        # Lock actualized months to actuals
         if per in ACTUALIZED_PERIODS:
             actual=None
             if actuals_pivot is not None:
@@ -216,61 +187,43 @@ def recalc(df_long: pd.DataFrame, prior_df: pd.DataFrame, ctx: Ctx, actuals_pivo
             say(f"{acc} {per} CALC → Actual {df.at[idx,'Value']:.2f}")
             continue
 
-        if drv=="MANUAL":
-            df.at[idx,"Value"]=param
-            say(f"{acc} {per} CALC: MANUAL {param:.2f}")
-        elif drv=="PCT_GROWTH":
-            df.at[idx,"Value"]=py_val*(1.0+param)
-            say(f"{acc} {per} CALC: PY {py_val:.2f}*(1+{param:.2%})")
-        elif drv=="PCT_OF_SALES":
-            sales=get_sales(per); df.at[idx,"Value"]=sales*param
-            say(f"{acc} {per} CALC: {param:.2%} * Sales {sales:.2f}")
+        if   drv=="MANUAL":          df.at[idx,"Value"]=param
+        elif drv=="PCT_GROWTH":      df.at[idx,"Value"]=py_val*(1.0+param)
+        elif drv=="PCT_OF_SALES":    df.at[idx,"Value"]=get_sales(per)*param
         elif drv=="PY_RATIO_SALES":
             try: py_sales=float(py.loc[("Sales","Revenue"), per])
             except Exception: py_sales=0.0
             ratio=(py_val/py_sales) if py_sales else 0.0
-            cpi_mult=1.0+ctx.cpi_yoy
-            df.at[idx,"Value"]=(py_sales*ratio)*cpi_mult
-            say(f"{acc} {per} CALC: Sales*Ratio({ratio:.2%})*CPI({ctx.cpi_yoy:.2%})")
-        elif drv=="CPI_INDEXED":
-            df.at[idx,"Value"]=py_val*(1.0+ctx.cpi_yoy)
-            say(f"{acc} {per} CALC: PY {py_val:.2f}*(1+CPI {ctx.cpi_yoy:.2%})")
-        elif drv=="OIL_LINKED_FREIGHT":
-            sales=get_sales(per); df.at[idx,"Value"]=sales*param*ctx.oil_ratio
-            say(f"{acc} {per} CALC: %Sales {param:.2%} * Oil {ctx.oil_ratio:.3f}")
-        elif drv=="FX_CONVERTED_SALES":
-            base_amt=param; df.at[idx,"Value"]=base_amt*ctx.fx_eur_to_target
-            say(f"{acc} {per} CALC: EUR {base_amt:.2f} * FX {ctx.fx_eur_to_target:.4f}")
-        else:
-            df.at[idx,"Value"]=py_val
-            say(f"{acc} {per} CALC: fallback PY {py_val:.2f}")
+            df.at[idx,"Value"]=(py_sales*ratio)*(1.0+ctx.cpi_yoy)
+        elif drv=="CPI_INDEXED":     df.at[idx,"Value"]=py_val*(1.0+ctx.cpi_yoy)
+        elif drv=="OIL_LINKED_FREIGHT": df.at[idx,"Value"]=get_sales(per)*param*ctx.oil_ratio
+        elif drv=="FX_CONVERTED_SALES": df.at[idx,"Value"]=param*ctx.fx_eur_to_target
+        else:                         df.at[idx,"Value"]=py_val
 
-    # 2) TOTAL = CALC + MANUAL_ADJ (for LINE rows)
+    # 2) TOTAL = CALC + MANUAL_ADJ (LINE rows)
     for (acc,typ,per), sub in df[df["RowType"]=="LINE"].groupby(["Account","Type","Period"]):
         calc=float(sub.loc[sub["Component"]=="CALC","Value"].sum()) if (sub["Component"]=="CALC").any() else 0.0
         adj =float(sub.loc[sub["Component"]=="MANUAL_ADJ","Value"].sum()) if (sub["Component"]=="MANUAL_ADJ").any() else 0.0
         df.loc[(df["RowType"]=="LINE")&(df["Account"]==acc)&(df["Type"]==typ)&(df["Component"]=="TOTAL")&(df["Period"]==per),"Value"]=calc+adj
 
-    # 3) SUBTOTAL per section (sum of LINE TOTALs by Type)
+    # 3) SUBTOTAL (sum of LINE TOTALs by Type)
     for sec in ACCOUNT_TYPES:
         for m in MONTHS:
             subtotal=float(df[(df["RowType"]=="LINE")&(df["Type"]==sec)&(df["Component"]=="TOTAL")&(df["Period"]==m)]["Value"].sum())
             df.loc[(df["RowType"]=="SUBTOTAL")&(df["Type"]==sec)&(df["Period"]==m),"Value"]=subtotal
 
-    # 4) COMPUTED lines using section subtotals
-    # Build section totals dict per month
+    # 4) COMPUTED lines
     for m in MONTHS:
         sec = { t: float(df[(df["RowType"]=="SUBTOTAL")&(df["Type"]==t)&(df["Period"]==m)]["Value"].sum()) for t in ACCOUNT_TYPES }
         for name, formula in COMPUTED_LINES:
             val=float(formula(sec))
             df.loc[(df["RowType"]=="COMPUTED")&(df["Account"]==name)&(df["Period"]==m),"Value"]=val
-
     return df
 
-# ---------------- UI ----------------
+# ---- UI ----
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
-st.caption("Single grid with hierarchy: LINE (editable), SUBTOTAL & COMPUTED (read-only). CALC + MANUAL_ADJ → TOTAL. Jan–Mar actuals locked.")
+st.caption("Single grid only. Edit LINE rows (CALC params & MANUAL_ADJ) for Apr–Dec. Jan–Mar locked. SUBTOTAL/COMPUTED are read-only.")
 
 with st.sidebar:
     st.header("Configuration")
@@ -293,9 +246,7 @@ if "unified" not in st.session_state:
     st.session_state["unified"] = seed_unified()
 unified = st.session_state["unified"].copy()
 
-# ---- Display the unified grid (hierarchical) ----
-st.subheader("Unified P&L Grid")
-# Wide pivot per months
+# Build wide grid from session state
 wide = unified.pivot_table(index=["Order","RowType","Type","Account","Component","Driver","Param"], columns="Period", values="Value", aggfunc="sum").reindex(columns=MONTHS, fill_value=0.0).reset_index()
 wide = wide.sort_values(["Order","RowType","Account","Component"]).reset_index(drop=True)
 
@@ -303,77 +254,51 @@ wide = wide.sort_values(["Order","RowType","Account","Component"]).reset_index(d
 rowtype_col = st.column_config.SelectboxColumn("RowType", options=["LINE","SUBTOTAL","COMPUTED"], disabled=True)
 type_col    = st.column_config.SelectboxColumn("Type", options=ACCOUNT_TYPES+["Computed"])
 acc_col     = st.column_config.TextColumn("Account")
-comp_col    = st.column_config.SelectboxColumn("Component", options=COMP_CHOICES, help="TOTAL for LINE is computed; SUBTOTAL/COMPUTED always TOTAL")
+comp_col    = st.column_config.SelectboxColumn("Component", options=COMP_CHOICES)
 drv_col     = st.column_config.SelectboxColumn("Driver", options=DRIVERS+["LOCK"])
 param_col   = st.column_config.TextColumn("Param")
 
-# Month columns: lock Jan–Mar; and lock SUBTOTAL/COMPUTED rows for all months; lock TOTAL rows for LINE for all months.
-num_cols={}
-for m in MONTHS:
-    num_cols[m] = st.column_config.NumberColumn(m, format="%.2f")
+num_cols={m: st.column_config.NumberColumn(m, format="%.2f") for m in MONTHS}
 
-# Build disabled map row-by-row after edit using rules; Streamlit data_editor can't dynamically per-cell lock via config,
-# so we pre-enforce by zeroing edits later if they violate rules.
 grid = st.data_editor(
     wide,
     use_container_width=True,
     num_rows="dynamic",
     column_config={
-        "RowType":rowtype_col,"Type":type_col,"Account":acc_col,"Component":comp_col,"Driver":drv_col,"Param":param_col, **num_cols
+        "RowType":rowtype_col,"Type":type_col,"Account":acc_col,"Component":comp_col,"Driver":drv_col,"Param":param_col,
+        **num_cols
     },
-    key="pl_v8_grid",
+    key="pl_v81_grid",
 )
 
-st.caption("Edit months only on **LINE + (CALC or MANUAL_ADJ)** rows for **Apr–Dec**. **TOTAL**, **SUBTOTAL**, and **COMPUTED** rows are read-only and will be recomputed.")
+st.caption("Edits allowed only on LINE + (CALC or MANUAL_ADJ) for Apr–Dec. TOTAL, SUBTOTAL, COMPUTED are recomputed.")
 
-# ---- Recalculate ----
-col1, col2 = st.columns(2)
-with col1:
-    if st.button("Recalculate", type="primary"):
-        # Convert back to long
-        long = grid.melt(id_vars=["Order","RowType","Type","Account","Component","Driver","Param"], value_vars=[c for c in grid.columns if c in MONTHS], var_name="Period", value_name="Value")
-        long["Value"]=pd.to_numeric(long["Value"],errors="coerce").fillna(0.0)
-        long["Period"]=long["Period"].apply(_norm_period)
+# Recalculate in-place: update session and rerun so the SAME grid reflects updates
+if st.button("Recalculate", type="primary"):
+    # Back to long
+    long = grid.melt(id_vars=["Order","RowType","Type","Account","Component","Driver","Param"], value_vars=[c for c in grid.columns if c in MONTHS], var_name="Period", value_name="Value")
+    long["Value"]=pd.to_numeric(long["Value"],errors="coerce").fillna(0.0)
+    long["Period"]=long["Period"].apply(_norm_period)
 
-        # Enforce lock rules before compute:
-        # - Jan–Mar: no edits allowed (revert to previous unified)
-        # - SUBTOTAL/COMPUTED: ignore edits
-        # - LINE TOTAL: ignore edits (computed)
-        prev = st.session_state["unified"]
-        for m in ACTUALIZED_PERIODS:
-            mask = long["Period"]==m
-            # restore prior values for actualized months from prev snapshot
-            join_cols=["Order","RowType","Type","Account","Component","Driver","Param","Period"]
-            long = long.merge(prev[join_cols+["Value"]].rename(columns={"Value":"PrevValue"}), on=join_cols, how="left")
-            long.loc[mask,"Value"]=long.loc[mask,"PrevValue"].fillna(long.loc[mask,"Value"])
-            long = long.drop(columns=["PrevValue"])
+    # Enforce lock rules by restoring locked cells from previous snapshot
+    prev = st.session_state["unified"]
+    join_cols=["Order","RowType","Type","Account","Component","Driver","Param","Period"]
 
-        mask_lock = (long["RowType"].isin(["SUBTOTAL","COMPUTED"])) | ((long["RowType"]=="LINE") & (long["Component"]=="TOTAL"))
-        if mask_lock.any():
-            # restore locked lines fully from previous
-            join_cols=["Order","RowType","Type","Account","Component","Driver","Param","Period"]
-            long = long.merge(prev[join_cols+["Value"]].rename(columns={"Value":"PrevValue2"}), on=join_cols, how="left")
-            long.loc[mask_lock,"Value"]=long.loc[mask_lock,"PrevValue2"].fillna(long.loc[mask_lock,"Value"])
-            long = long.drop(columns=["PrevValue2"])
+    # Jan–Mar locked for all
+    long = long.merge(prev[join_cols+["Value"]].rename(columns={"Value":"PrevA"}), on=join_cols, how="left")
+    long.loc[long["Period"].isin(ACTUALIZED_PERIODS),"Value"] = long.loc[long["Period"].isin(ACTUALIZED_PERIODS),"PrevA"].fillna(long.loc[long["Period"].isin(ACTUALIZED_PERIODS),"Value"])
+    long = long.drop(columns=["PrevA"])
 
-        # Compute results
-        clear_explain()
-        out = recalc(long, prior_df, ctx, actuals_pivot)
-        st.session_state["unified"]=out
-        st.success("Recalculated. See updated grid below.")
+    # SUBTOTAL/COMPUTED always locked; LINE TOTAL locked
+    mask_lock = (long["RowType"].isin(["SUBTOTAL","COMPUTED"])) | ((long["RowType"]=="LINE") & (long["Component"]=="TOTAL"))
+    long = long.merge(prev[join_cols+["Value"]].rename(columns={"Value":"PrevB"}), on=join_cols, how="left")
+    long.loc[mask_lock,"Value"] = long.loc[mask_lock,"PrevB"].fillna(long.loc[mask_lock,"Value"])
+    long = long.drop(columns=["PrevB"])
 
-with col2:
-    if st.button("Restore Demo Grid"):
-        st.session_state["unified"]=seed_unified()
-        st.experimental_rerun()
+    # Compute & store
+    clear_explain()
+    out = recalc(long, prior_df, ctx, actuals_pivot)
+    st.session_state["unified"] = out
 
-# ---- Show result (same unified grid) ----
-st.subheader("Result (same grid)")
-res = st.session_state["unified"]
-wide_out = res.pivot_table(index=["Order","RowType","Type","Account","Component","Driver","Param"], columns="Period", values="Value", aggfunc="sum").reindex(columns=MONTHS, fill_value=0.0).reset_index()
-wide_out = wide_out.sort_values(["Order","RowType","Account","Component"]).reset_index(drop=True)
-st.dataframe(wide_out, use_container_width=True)
-
-st.subheader("Explainability")
-for m in st.session_state.get("explain",[]):
-    st.write("•", m)
+    # Rerun to refresh the SAME grid with new values
+    st.experimental_rerun()
