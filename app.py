@@ -282,7 +282,7 @@ with tab2:
         st.info("Enable Google Sheets in the sidebar to persist scenarios.")
 
 with tab3:
-    st.markdown(\"\"\"
+    st.markdown("""
 **Included drivers**
 - `MANUAL`, `PCT_GROWTH`, `PCT_OF_SALES`, `PY_RATIO_SALES` (with CPI)
 - `CPI_INDEXED`, `OIL_LINKED_FREIGHT`, `FX_CONVERTED_SALES`
@@ -291,4 +291,4 @@ with tab3:
 - Replace `fetch_cpi_yoy()` with BLS/FRED
 - Add weather/commodity drivers
 - Add Entities/Categories to the schema and UI filters
-\"\"\")
+""")
