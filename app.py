@@ -7,24 +7,16 @@ import requests
 import pandas as pd
 import streamlit as st
 
-# =============================
-# CONFIG
-# =============================
-APP_TITLE = "Agentic Driver-Based Planning — Actualized + Grid v4"
+APP_TITLE = "Agentic Driver-Based Planning — Actuals-in-Grid v5"
 SHEET_NAME = "AgenticPlanner"
-TAB_PRIOR = "prior_year"       # legacy name; this is your actuals source
+TAB_PRIOR = "prior_year"
 TAB_INPUT = "forecast_input"
 TAB_SCENARIOS = "scenarios"
 DEFAULT_ENTITY = "Orvis"
 DEFAULT_CURRENCY = "USD"
 
-# =============================
-# Grid & Period helpers
-# =============================
 MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-# 🔒 Months that are actualized and locked in the grid
 ACTUALIZED_PERIODS = ["Jan", "Feb", "Mar"]
-
 MONTH_ALIASES = {
     "jan":"Jan","january":"Jan","01":"Jan","1":"Jan",
     "feb":"Feb","february":"Feb","02":"Feb","2":"Feb",
@@ -51,15 +43,7 @@ def _normalize_period(val: str) -> str:
     valid_prefixes = {m.lower()[:3] for m in MONTHS}
     return s3.title() if s3 in valid_prefixes else s.title()
 
-DRIVER_CHOICES = [
-    "MANUAL",
-    "PCT_GROWTH",
-    "PCT_OF_SALES",
-    "PY_RATIO_SALES",
-    "CPI_INDEXED",
-    "OIL_LINKED_FREIGHT",
-    "FX_CONVERTED_SALES",
-]
+DRIVER_CHOICES = ["MANUAL","PCT_GROWTH","PCT_OF_SALES","PY_RATIO_SALES","CPI_INDEXED","OIL_LINKED_FREIGHT","FX_CONVERTED_SALES"]
 
 def to_wide_input(long_df: pd.DataFrame) -> pd.DataFrame:
     base = long_df.copy()
@@ -68,15 +52,9 @@ def to_wide_input(long_df: pd.DataFrame) -> pd.DataFrame:
             base[c] = "" if c != "Value" else 0.0
     base["Period"] = base["Period"].apply(_normalize_period)
     base["Value"] = pd.to_numeric(base["Value"], errors="coerce").fillna(0.0)
-    piv = base.pivot_table(
-        index=["Account","Driver","Param"],
-        columns="Period",
-        values="Value",
-        aggfunc="sum",
-    )
+    piv = base.pivot_table(index=["Account","Driver","Param"], columns="Period", values="Value", aggfunc="sum")
     piv = piv.reindex(columns=MONTHS, fill_value=0.0).reset_index()
-    ordered = ["Account","Driver","Param"] + MONTHS
-    return piv.reindex(columns=ordered)
+    return piv.reindex(columns=["Account","Driver","Param"] + MONTHS)
 
 def to_long_input(wide_df: pd.DataFrame) -> pd.DataFrame:
     keep = ["Account","Driver","Param"]
@@ -84,19 +62,11 @@ def to_long_input(wide_df: pd.DataFrame) -> pd.DataFrame:
         if k not in wide_df.columns:
             wide_df[k] = ""
     val_cols = [c for c in wide_df.columns if c in MONTHS]
-    melted = wide_df.melt(
-        id_vars=keep,
-        value_vars=val_cols,
-        var_name="Period",
-        value_name="Value",
-    )
+    melted = wide_df.melt(id_vars=keep, value_vars=val_cols, var_name="Period", value_name="Value")
     melted["Period"] = melted["Period"].apply(_normalize_period)
     melted["Value"] = pd.to_numeric(melted["Value"], errors="coerce").fillna(0.0)
     return melted.reindex(columns=["Account","Period","Driver","Param","Value"])
 
-# =============================
-# OPTIONAL: Google Sheets
-# =============================
 @st.cache_resource(show_spinner=False)
 def get_gspread_client():
     try:
@@ -107,10 +77,7 @@ def get_gspread_client():
     if "gcp_service_account" not in st.secrets:
         return None
     creds_info = st.secrets["gcp_service_account"]
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
+    scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
     credentials = Credentials.from_service_account_info(creds_info, scopes=scopes)
     import gspread
     return gspread.authorize(credentials)
@@ -127,11 +94,7 @@ def get_or_create_sheet(client, spreadsheet_name=SHEET_NAME):
             sh.worksheet(name)
         except Exception:
             sh.add_worksheet(title=name, rows=500, cols=30)
-    return sh, {
-        TAB_PRIOR: sh.worksheet(TAB_PRIOR),
-        TAB_INPUT: sh.worksheet(TAB_INPUT),
-        TAB_SCENARIOS: sh.worksheet(TAB_SCENARIOS),
-    }
+    return sh, {TAB_PRIOR: sh.worksheet(TAB_PRIOR), TAB_INPUT: sh.worksheet(TAB_INPUT), TAB_SCENARIOS: sh.worksheet(TAB_SCENARIOS)}
 
 def read_sheet_df(worksheet):
     values = worksheet.get_all_values()
@@ -144,9 +107,6 @@ def write_sheet_df(worksheet, df: pd.DataFrame):
     worksheet.clear()
     worksheet.update([df.columns.values.tolist()] + df.astype(str).values.tolist())
 
-# =============================
-# External Drivers (cached)
-# =============================
 @st.cache_data(ttl=3600)
 def fetch_cpi_yoy() -> Tuple[float, str]:
     return 0.022, "CPI YoY (demo) = 2.2%"
@@ -170,9 +130,6 @@ def fetch_oil_index_ratio(prev_baseline: float = 75.0) -> Tuple[float, str]:
     ratio = current / max(prev_baseline, 1.0)
     return ratio, f"Oil index ratio = {current:.1f}/{prev_baseline:.1f} = {ratio:.3f} (demo)"
 
-# =============================
-# Demo seed data
-# =============================
 @st.cache_data
 def demo_prior_year() -> pd.DataFrame:
     data = []
@@ -209,9 +166,6 @@ def demo_forecast_input() -> pd.DataFrame:
     ]
     return pd.DataFrame(data)
 
-# =============================
-# Agentic Context & engine
-# =============================
 @dataclass
 class Context:
     entity: str
@@ -259,7 +213,6 @@ def agent_recalculate(
             pval = 0.0
         py_val = float(py.loc[acc, per]) if (acc in py.index and per in py.columns) else 0.0
 
-        # 🔒 Bypass drivers for actualized months: use actuals if available
         if per in ACTUALIZED_PERIODS:
             actual_val = None
             if actuals_pivot is not None:
@@ -295,12 +248,9 @@ def agent_recalculate(
         outputs.append({"Account": acc, "Period": per, "Value": round(val, 2), "Source": src})
     return pd.DataFrame(outputs)
 
-# =============================
-# UI
-# =============================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
-st.caption("Actualized Jan–Mar (locked) + Grid inputs for Apr–Dec. Periods normalized, driver picklists per row.")
+st.caption("Actuals (Jan–Mar) embedded & locked inside the grid. Edit Apr–Dec to plan.")
 
 with st.sidebar:
     st.header("Configuration")
@@ -341,27 +291,16 @@ if worksheets:
 else:
     prior_df = demo_prior_year(); input_df = demo_forecast_input()
 
-# === Build Actuals (Jan–Mar) from prior_df ===
 prior_df["Period"] = prior_df["Period"].apply(_normalize_period)
 actuals_df = prior_df[prior_df["Period"].isin(ACTUALIZED_PERIODS)].copy()
-actuals_pivot = actuals_df.pivot_table(index="Account", columns="Period", values="Value", aggfunc="sum")
-actuals_pivot = actuals_pivot.reindex(columns=MONTHS, fill_value=0.0).fillna(0.0)
+actuals_pivot = actuals_df.pivot_table(index="Account", columns="Period", values="Value", aggfunc="sum").reindex(columns=MONTHS, fill_value=0.0).fillna(0.0)
 
-tab1, tab2, tab3 = st.tabs(["Actuals & Inputs", "Scenarios", "About"])
+tab1, tab2, tab3 = st.tabs(["Inputs & Results", "Scenarios", "About"])
 
 with tab1:
-    # 1) Actuals table (replaces the old "Prior Year" table)
-    st.subheader("1) Actualized (locked) — Jan–Mar")
-    if actuals_df.empty:
-        st.info("No actuals found for Jan–Mar. Populate the actuals source (tab 'prior_year').")
-    else:
-        st.dataframe(actuals_df.sort_values(["Account","Period"]), use_container_width=True)
-
-    # 2) Forecast inputs grid
-    st.subheader("2) Forecast Inputs (accounts ↓, periods →)")
+    st.subheader("Forecast Inputs (accounts ↓, periods →)")
     wide_input = to_wide_input(input_df)
 
-    # Overlay actuals into the grid and lock those columns
     if not actuals_pivot.empty:
         missing_accounts = sorted(set(actuals_pivot.index) - set(wide_input["Account"]))
         if missing_accounts:
@@ -372,7 +311,6 @@ with tab1:
         wide_input = wide_input.set_index(["Account","Driver","Param"])
         for m in ACTUALIZED_PERIODS:
             if m in wide_input.columns and m in actuals_pivot.columns:
-                # write the same actual value across all rows for that account (common FP&A pattern)
                 for acc in actuals_pivot.index:
                     mask = wide_input.index.get_level_values(0) == acc
                     if mask.any():
@@ -433,7 +371,7 @@ with tab1:
             st.session_state["input_editor"] = demo
             st.experimental_rerun()
 
-    st.subheader("3) Recalculated Forecast")
+    st.subheader("Recalculated Forecast")
     result_df = st.session_state.get("result_df")
     if result_df is not None:
         st.dataframe(result_df, use_container_width=True)
@@ -442,7 +380,7 @@ with tab1:
     else:
         st.info("Click 'Recalculate Forecast' to compute results.")
 
-    st.subheader("4) Explainability Pane")
+    st.subheader("Explainability Pane")
     for msg in st.session_state.get("explain", []):
         st.write("•", msg)
 
