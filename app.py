@@ -1,7 +1,7 @@
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import requests
 import pandas as pd
@@ -10,16 +10,47 @@ import streamlit as st
 # =============================
 # CONFIG
 # =============================
-APP_TITLE = "Agentic Driver-Based Planning — Grid Input v2"
+APP_TITLE = "Agentic Driver-Based Planning — Actualized + Grid v4"
 SHEET_NAME = "AgenticPlanner"
-TAB_PRIOR = "prior_year"
+TAB_PRIOR = "prior_year"       # legacy name; this is your actuals source
 TAB_INPUT = "forecast_input"
 TAB_SCENARIOS = "scenarios"
 DEFAULT_ENTITY = "Orvis"
 DEFAULT_CURRENCY = "USD"
 
-# Grid helpers
+# =============================
+# Grid & Period helpers
+# =============================
 MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+# 🔒 Months that are actualized and locked in the grid
+ACTUALIZED_PERIODS = ["Jan", "Feb", "Mar"]
+
+MONTH_ALIASES = {
+    "jan":"Jan","january":"Jan","01":"Jan","1":"Jan",
+    "feb":"Feb","february":"Feb","02":"Feb","2":"Feb",
+    "mar":"Mar","march":"Mar","03":"Mar","3":"Mar",
+    "apr":"Apr","april":"Apr","04":"Apr","4":"Apr",
+    "may":"May","05":"May","5":"May",
+    "jun":"Jun","june":"Jun","06":"Jun","6":"Jun",
+    "jul":"Jul","july":"Jul","07":"Jul","7":"Jul",
+    "aug":"Aug","august":"Aug","08":"Aug","8":"Aug",
+    "sep":"Sep","sept":"Sep","september":"Sep","09":"Sep","9":"Sep",
+    "oct":"Oct","october":"Oct","10":"Oct",
+    "nov":"Nov","november":"Nov","11":"Nov",
+    "dec":"Dec","december":"Dec","12":"Dec",
+}
+def _normalize_period(val: str) -> str:
+    if val is None:
+        return ""
+    s = str(val).strip().lower()
+    if s in MONTH_ALIASES:
+        return MONTH_ALIASES[s]
+    s3 = s[:3]
+    if s3 in MONTH_ALIASES:
+        return MONTH_ALIASES[s3]
+    valid_prefixes = {m.lower()[:3] for m in MONTHS}
+    return s3.title() if s3 in valid_prefixes else s.title()
+
 DRIVER_CHOICES = [
     "MANUAL",
     "PCT_GROWTH",
@@ -35,16 +66,17 @@ def to_wide_input(long_df: pd.DataFrame) -> pd.DataFrame:
     for c in ["Account","Period","Driver","Param","Value"]:
         if c not in base.columns:
             base[c] = "" if c != "Value" else 0.0
+    base["Period"] = base["Period"].apply(_normalize_period)
     base["Value"] = pd.to_numeric(base["Value"], errors="coerce").fillna(0.0)
     piv = base.pivot_table(
         index=["Account","Driver","Param"],
         columns="Period",
         values="Value",
         aggfunc="sum",
-    ).reindex(columns=MONTHS, fill_value=0.0).reset_index()
+    )
+    piv = piv.reindex(columns=MONTHS, fill_value=0.0).reset_index()
     ordered = ["Account","Driver","Param"] + MONTHS
-    piv = piv.reindex(columns=ordered)
-    return piv
+    return piv.reindex(columns=ordered)
 
 def to_long_input(wide_df: pd.DataFrame) -> pd.DataFrame:
     keep = ["Account","Driver","Param"]
@@ -58,10 +90,9 @@ def to_long_input(wide_df: pd.DataFrame) -> pd.DataFrame:
         var_name="Period",
         value_name="Value",
     )
+    melted["Period"] = melted["Period"].apply(_normalize_period)
     melted["Value"] = pd.to_numeric(melted["Value"], errors="coerce").fillna(0.0)
-    cols = ["Account","Period","Driver","Param","Value"]
-    melted = melted.reindex(columns=cols)
-    return melted
+    return melted.reindex(columns=["Account","Period","Driver","Param","Value"])
 
 # =============================
 # OPTIONAL: Google Sheets
@@ -196,7 +227,12 @@ def say(msg):
 def clear_explain():
     st.session_state.pop("explain", None)
 
-def agent_recalculate(prior_df: pd.DataFrame, input_df: pd.DataFrame, ctx: Context) -> pd.DataFrame:
+def agent_recalculate(
+    prior_df: pd.DataFrame,
+    input_df: pd.DataFrame,
+    ctx: Context,
+    actuals_pivot: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
     for df in (prior_df, input_df):
         if "Value" in df.columns:
             df["Value"] = pd.to_numeric(df["Value"], errors="coerce").fillna(0.0)
@@ -215,13 +251,27 @@ def agent_recalculate(prior_df: pd.DataFrame, input_df: pd.DataFrame, ctx: Conte
     outputs: List[Dict] = []
     for _, row in input_df.iterrows():
         acc = str(row.get("Account",""))
-        per = str(row.get("Period",""))
+        per = _normalize_period(str(row.get("Period","")))
         drv = str(row.get("Driver","")).upper().strip()
         try:
             pval = float(row.get("Value", 0.0))
         except Exception:
             pval = 0.0
         py_val = float(py.loc[acc, per]) if (acc in py.index and per in py.columns) else 0.0
+
+        # 🔒 Bypass drivers for actualized months: use actuals if available
+        if per in ACTUALIZED_PERIODS:
+            actual_val = None
+            if actuals_pivot is not None:
+                try:
+                    actual_val = float(actuals_pivot.loc[acc, per])
+                except Exception:
+                    actual_val = None
+            val = actual_val if actual_val is not None else py_val
+            src = "Actual"
+            say(f"{acc} {per}: using Actual = {val:,.2f}.")
+            outputs.append({"Account": acc, "Period": per, "Value": round(val, 2), "Source": src})
+            continue
 
         if drv == "MANUAL":
             val = pval; src = "Manual Input"; say(f"{acc} {per}: set to {val:,.2f}.")
@@ -250,7 +300,7 @@ def agent_recalculate(prior_df: pd.DataFrame, input_df: pd.DataFrame, ctx: Conte
 # =============================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
-st.caption("Grid-style inputs: Accounts ↓, Periods →, with per-row Driver picklists.")
+st.caption("Actualized Jan–Mar (locked) + Grid inputs for Apr–Dec. Periods normalized, driver picklists per row.")
 
 with st.sidebar:
     st.header("Configuration")
@@ -291,19 +341,57 @@ if worksheets:
 else:
     prior_df = demo_prior_year(); input_df = demo_forecast_input()
 
-tab1, tab2, tab3 = st.tabs(["Inputs & Results", "Scenarios", "About"])
+# === Build Actuals (Jan–Mar) from prior_df ===
+prior_df["Period"] = prior_df["Period"].apply(_normalize_period)
+actuals_df = prior_df[prior_df["Period"].isin(ACTUALIZED_PERIODS)].copy()
+actuals_pivot = actuals_df.pivot_table(index="Account", columns="Period", values="Value", aggfunc="sum")
+actuals_pivot = actuals_pivot.reindex(columns=MONTHS, fill_value=0.0).fillna(0.0)
+
+tab1, tab2, tab3 = st.tabs(["Actuals & Inputs", "Scenarios", "About"])
 
 with tab1:
-    st.subheader("1) Prior Year (reference)")
-    st.dataframe(prior_df, use_container_width=True)
+    # 1) Actuals table (replaces the old "Prior Year" table)
+    st.subheader("1) Actualized (locked) — Jan–Mar")
+    if actuals_df.empty:
+        st.info("No actuals found for Jan–Mar. Populate the actuals source (tab 'prior_year').")
+    else:
+        st.dataframe(actuals_df.sort_values(["Account","Period"]), use_container_width=True)
 
+    # 2) Forecast inputs grid
     st.subheader("2) Forecast Inputs (accounts ↓, periods →)")
     wide_input = to_wide_input(input_df)
+
+    # Overlay actuals into the grid and lock those columns
+    if not actuals_pivot.empty:
+        missing_accounts = sorted(set(actuals_pivot.index) - set(wide_input["Account"]))
+        if missing_accounts:
+            add_rows = [{"Account": acc, "Driver": "MANUAL", "Param": ""} for acc in missing_accounts]
+            if add_rows:
+                wide_input = pd.concat([wide_input, pd.DataFrame(add_rows)], ignore_index=True)
+
+        wide_input = wide_input.set_index(["Account","Driver","Param"])
+        for m in ACTUALIZED_PERIODS:
+            if m in wide_input.columns and m in actuals_pivot.columns:
+                # write the same actual value across all rows for that account (common FP&A pattern)
+                for acc in actuals_pivot.index:
+                    mask = wide_input.index.get_level_values(0) == acc
+                    if mask.any():
+                        try:
+                            wide_input.loc[mask, m] = float(actuals_pivot.loc[acc, m])
+                        except Exception:
+                            pass
+        wide_input = wide_input.reset_index()
 
     driver_col = st.column_config.SelectboxColumn("Driver", options=DRIVER_CHOICES, help="Choose a driver for this account row")
     account_col = st.column_config.TextColumn("Account", help="Account name (e.g., Sales, COGS, Freight, Royalty Income)")
     param_col = st.column_config.TextColumn("Param", help="Label like 'Growth%' or '% of Sales'")
-    num_cols = {m: st.column_config.NumberColumn(m, help=f"Value for {m}", step=1.0, format="%.2f") for m in MONTHS}
+
+    num_cols = {}
+    for m in MONTHS:
+        if m in ACTUALIZED_PERIODS:
+            num_cols[m] = st.column_config.NumberColumn(m, help=f"{m} actual (locked)", disabled=True, format="%.2f")
+        else:
+            num_cols[m] = st.column_config.NumberColumn(m, help=f"Forecast for {m}", step=1.0, format="%.2f")
 
     wide_edited = st.data_editor(
         wide_input,
@@ -317,6 +405,7 @@ with tab1:
         },
         key="input_grid",
     )
+    st.caption(f"🔒 Actuals locked: {', '.join(ACTUALIZED_PERIODS)}. Edit Apr–Dec to plan.")
 
     colA, colB, colC = st.columns(3)
     with colA:
@@ -324,7 +413,7 @@ with tab1:
             clear_explain()
             edited_long = to_long_input(wide_edited)
             st.session_state["input_editor"] = edited_long
-            result = agent_recalculate(prior_df, edited_long, ctx)
+            result = agent_recalculate(prior_df, edited_long, ctx, actuals_pivot=actuals_pivot)
             st.session_state["result_df"] = result
             if worksheets:
                 write_sheet_df(worksheets[TAB_INPUT], edited_long)
@@ -349,8 +438,7 @@ with tab1:
     if result_df is not None:
         st.dataframe(result_df, use_container_width=True)
         by_acc = result_df.groupby("Account")["Value"].sum().reset_index()
-        st.caption("Totals by Account (current run)")
-        st.dataframe(by_acc, use_container_width=True)
+        st.caption("Totals by Account (current run)"); st.dataframe(by_acc, use_container_width=True)
     else:
         st.info("Click 'Recalculate Forecast' to compute results.")
 
