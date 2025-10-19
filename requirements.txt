@@ -1,5 +1,5 @@
-streamlit>=1.38
-pandas
-requests
-gspread
-google-auth
+streamlit==1.38.0
+pandas==2.2.2
+requests==2.32.3
+streamlit-aggrid==0.3.4.post3
+
