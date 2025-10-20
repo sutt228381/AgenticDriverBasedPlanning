@@ -1,211 +1,211 @@
 
 import streamlit as st
 import pandas as pd
+from dataclasses import dataclass
+from typing import Dict, List
 
-st.set_page_config(page_title="P&L (WSP-Style) — v10", layout="wide")
+st.set_page_config(page_title="Agentic Driver-Based Planning — v12 (Months Across)", layout="wide")
 
-# -------------------- THEME / CSS --------------------
-WSP_BLUE = "#0B3D91"
-WSP_GRAY = "#F4F6F8"
-WSP_DARK = "#1F2937"
+APP_TITLE = "Agentic Driver-Based Planning — Hierarchical P&L v12 (Months Across)"
+MONTHS: List[str] = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+LOCKED = {"Jan","Feb","Mar"}  # actualized (read-only)
 
-st.markdown(f"""
-<style>
-:root {{
-  --wsp-blue: {WSP_BLUE};
-  --wsp-gray: {WSP_GRAY};
-  --wsp-dark: {WSP_DARK};
-}}
-html, body, [data-testid="stApp"] {{
-  background: white;
-}}
-h1, h2, h3 {{
-  color: var(--wsp-dark);
-  margin-top: 0.25rem;
-}}
-.section-card {{
-  border: 1px solid #E5E7EB;
-  border-radius: 12px;
-  padding: 1rem 1.25rem;
-  background: white;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-}}
-.kpi {{
-  background: var(--wsp-gray);
-  border-radius: 10px;
-  padding: 0.75rem 1rem;
-  text-align: center;
-}}
-.kpi .label {{
-  color: #6B7280; font-size: 0.8rem; text-transform: uppercase; letter-spacing: .08em;
-}}
-.kpi .value {{
-  color: var(--wsp-dark); font-weight: 700; font-size: 1.15rem;
-}}
-table.pandastable {{
-  border-collapse: collapse;
-  width: 100%;
-  font-size: 0.95rem;
-}}
-table.pandastable th, table.pandastable td {{
-  border-bottom: 1px solid #E5E7EB;
-  padding: 6px 8px;
-}}
-table.pandastable th {{
-  background: var(--wsp-gray);
-  color: var(--wsp-dark);
-  font-weight: 700;
-}}
-.row-label {{
-  font-weight: 600;
-}}
-.subtle {{
-  color: #6B7280;
-  font-size: 0.9rem;
-}}
-.input-blue input {{
-  color: #0B3D91 !important;
-  font-weight: 700 !important;
-}}
-.negative {{ color: #B91C1C; }}
-.positive {{ color: #065F46; }}
-</style>
-""", unsafe_allow_html=True)
+SECTIONS = [
+    ("Revenue", ["Sales","Returns & Allowances","Royalty Income"]),
+    ("COGS",    ["COGS","Freight","Fulfillment"]),
+    ("Opex",    ["Marketing","Payroll","G&A","Depreciation"]),
+    ("Other",   ["Other Income","Interest Expense"]),
+    ("Taxes",   ["Taxes"]),
+]
 
-# -------------------- INTRO / HEADER --------------------
-st.markdown("<h1>P&amp;L — Profit &amp; Loss (WSP-Style)</h1>", unsafe_allow_html=True)
-st.caption("Based on Wall Street Prep’s structure: Net Revenue → COGS → Gross Profit → Opex → EBIT → Interest → EBT → Taxes → Net Income.")
+@dataclass
+class LineMeta:
+    driver: str
+    param: str
 
-# -------------------- INPUTS / CALCULATOR (like article's example) --------------------
-with st.sidebar:
-    st.header("Assumptions (blue = inputs)")
-    st.markdown('<div class="subtle">All expenses entered as negatives.</div>', unsafe_allow_html=True)
-    rev = st.number_input("Revenue", value=100_000_000.0, step=1_000_000.0, format="%.0f", key="rev", help="Top line (Net Revenue)")
-    cogs = st.number_input("COGS", value=-40_000_000.0, step=1_000_000.0, format="%.0f", key="cogs", help="Cost of Goods Sold (enter negative)")
-    sga = st.number_input("SG&A", value=-20_000_000.0, step=1_000_000.0, format="%.0f", key="sga", help="Operating Expenses (enter negative)")
-    interest = st.number_input("Interest Expense", value=-5_000_000.0, step=500_000.0, format="%.0f", key="int", help="Non-operating item (enter negative)")
-    tax_rate = st.number_input("Effective Tax Rate (%)", value=30.0, step=0.5, key="tax", help="Applied to EBT")
+DEFAULT_DRIVERS: Dict[str, LineMeta] = {
+    "Sales": LineMeta("MANUAL","Amount"),
+    "Returns & Allowances": LineMeta("PCT_OF_SALES","% of Sales"),
+    "Royalty Income": LineMeta("PY_RATIO_SALES",""),
+    "COGS": LineMeta("PCT_GROWTH","Growth%"),
+    "Freight": LineMeta("OIL_LINKED_FREIGHT","% of Sales"),
+    "Fulfillment": LineMeta("PCT_OF_SALES","% of Sales"),
+    "Marketing": LineMeta("PCT_OF_SALES","% of Sales"),
+    "Payroll": LineMeta("CPI_INDEXED",""),
+    "G&A": LineMeta("CPI_INDEXED",""),
+    "Depreciation": LineMeta("MANUAL","Amount"),
+    "Other Income": LineMeta("MANUAL","Amount"),
+    "Interest Expense": LineMeta("MANUAL","Amount"),
+    "Taxes": LineMeta("MANUAL","Amount"),
+}
 
-# -------------------- CALC --------------------
-gross_profit = rev + cogs
-ebit = gross_profit + sga
-ebt = ebit + interest
-taxes = -(max(ebt, 0.0) * (tax_rate/100.0))  # negative outflow
-net_income = ebt + taxes
+COMPUTED_ORDER = ["Gross Profit","Operating Income","Pre-Tax Income","Net Income"]
 
-def fmt(n):
-    return f"${n:,.0f}"
+def seed_cube()->pd.DataFrame:
+    rows = []
+    order = 0
+    for sec, accounts in SECTIONS:
+        for acc in accounts:
+            meta = DEFAULT_DRIVERS[acc]
+            for comp in ["CALC","MANUAL_ADJ","TOTAL"]:
+                row = {
+                    "Order": order, "Section": sec, "Account": acc, "Component": comp,
+                    "Driver": meta.driver if comp=="CALC" else "MANUAL",
+                    "Param":  meta.param if comp=="CALC" else "Adj",
+                }
+                for m in MONTHS:
+                    row[m] = 0.0
+                rows.append(row)
+            order += 1
+    df = pd.DataFrame(rows)
+    # Seed Jan–Mar Sales CALC (actualized feel)
+    df.loc[(df.Account=="Sales")&(df.Component=="CALC"), ["Jan","Feb","Mar"]] = [120000.0,118000.0,119500.0]
+    return df
 
-# KPI header
-k1, k2, k3, k4 = st.columns(4)
-with k1: st.markdown(f'<div class="kpi"><div class="label">Gross Profit</div><div class="value">{fmt(gross_profit)}</div></div>', unsafe_allow_html=True)
-with k2: st.markdown(f'<div class="kpi"><div class="label">EBIT</div><div class="value">{fmt(ebit)}</div></div>', unsafe_allow_html=True)
-with k3: st.markdown(f'<div class="kpi"><div class="label">EBT</div><div class="value">{fmt(ebt)}</div></div>', unsafe_allow_html=True)
-with k4: st.markdown(f'<div class="kpi"><div class="label">Net Income</div><div class="value">{fmt(net_income)}</div></div>', unsafe_allow_html=True)
-
-st.markdown("---")
-
-# -------------------- SINGLE-PERIOD STATEMENT --------------------
-st.subheader("Single-Period P&L (Calculator)")
-calc_df = pd.DataFrame({
-    "Line Item": [
-        "Net Revenue",
-        "Less: COGS",
-        "Gross Profit",
-        "Less: Operating Expenses (SG&A)",
-        "Operating Income (EBIT)",
-        "Less: Interest Expense",
-        "Pre-Tax Income (EBT)",
-        "Less: Income Taxes",
-        "Net Income"
-    ],
-    "Amount": [
-        rev,
-        cogs,
-        gross_profit,
-        sga,
-        ebit,
-        interest,
-        ebt,
-        taxes,
-        net_income
-    ]
-})
-
-# Percent margins
-calc_df["% of Revenue"] = (calc_df["Amount"] / rev).map(lambda x: f"{x*100:.1f}%") if rev != 0 else "—"
-
-def style_amount(x):
-    cls = "negative" if x < 0 else "positive"
-    return f'<span class="{cls}">{fmt(x)}</span>'
-
-styled_calc = calc_df.copy()
-styled_calc["Amount"] = styled_calc["Amount"].map(style_amount)
-styled_calc.rename(columns={"Line Item":"", "Amount":"Amount (USD)"}, inplace=True)
-
-st.markdown(styled_calc.to_html(escape=False, index=False, classes="pandastable"), unsafe_allow_html=True)
-
-st.markdown("---")
-
-# -------------------- MULTI-PERIOD EDITABLE GRID --------------------
-st.subheader("Multi-Period P&L (Editable)")
-
-# Default grid: 12 months, inputs blue-ish, computed black (like the article convention)
-months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-if "grid" not in st.session_state:
-    st.session_state["grid"] = pd.DataFrame({
-        "Line Item": ["Net Revenue", "COGS", "SG&A", "Interest Expense", "Tax Rate %"],
-        **{m: [10_000_000, -4_000_000, -2_000_000, -500_000, 30.0] for m in months}
-    })
-
-grid = st.session_state["grid"].copy()
-
-# Editor
-edited = st.data_editor(
-    grid,
-    use_container_width=True,
-    num_rows="dynamic",
-    column_config={
-        **{m: st.column_config.NumberColumn() for m in months}
-    }
-)
-
-# Recompute a derived statement with margins & subtotals for each month
-def compute_statement(df):
-    out_rows = []
-    for m in months:
-        rev = float(df.loc[df["Line Item"]=="Net Revenue", m])
-        cogs = float(df.loc[df["Line Item"]=="COGS", m])
-        sga = float(df.loc[df["Line Item"]=="SG&A", m])
-        intr = float(df.loc[df["Line Item"]=="Interest Expense", m])
-        tax_pct = float(df.loc[df["Line Item"]=="Tax Rate %", m])
-        gross = rev + cogs
-        ebit = gross + sga
-        ebt = ebit + intr
-        taxes = -(max(ebt,0.0) * (tax_pct/100.0))
-        ni = ebt + taxes
-        out_rows.append([m, rev, cogs, gross, sga, ebit, intr, ebt, taxes, ni])
-    out = pd.DataFrame(out_rows, columns=["Period","Net Revenue","COGS","Gross Profit","SG&A","EBIT","Interest Expense","EBT","Taxes","Net Income"])
-    # common-size
-    for col in ["COGS","Gross Profit","SG&A","EBIT","Interest Expense","EBT","Taxes","Net Income"]:
-        out[f"{col} %"] = (out[col] / out["Net Revenue"]).map(lambda x: f"{x*100:.1f}%" if pd.notnull(x) and x!=0 and out["Net Revenue"].ne(0).any() else "—")
+def recalc(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    # TOTAL = CALC + MANUAL_ADJ (for all months)
+    for m in MONTHS:
+        out.loc[out.Component=="TOTAL", m] = (
+            out.loc[out.Component=="CALC", m].values + out.loc[out.Component=="MANUAL_ADJ", m].values
+        )
     return out
 
-derived = compute_statement(edited)
+def section_totals(df_total: pd.DataFrame):
+    # returns {month: {section: value}}
+    res = {m:{} for m in MONTHS}
+    for sec, _ in SECTIONS:
+        mask = (df_total["Component"]=="TOTAL") & (df_total["Section"]==sec)
+        for m in MONTHS:
+            res[m][sec] = float(df_total.loc[mask, m].sum())
+    return res
 
-# Show two tabs: Statement and Common-Size
-t1, t2 = st.tabs(["Statement", "Common-Size %"])
+def computed_lines(sec_map):
+    out = {}
+    out["Gross Profit"]     = sec_map.get("Revenue",0.0) - sec_map.get("COGS",0.0)
+    out["Operating Income"] = out["Gross Profit"] - sec_map.get("Opex",0.0)
+    out["Pre-Tax Income"]   = out["Operating Income"] + sec_map.get("Other",0.0)
+    out["Net Income"]       = out["Pre-Tax Income"] - sec_map.get("Taxes",0.0)
+    return out
 
-with t1:
-    show_cols = ["Period","Net Revenue","COGS","Gross Profit","SG&A","EBIT","Interest Expense","EBT","Taxes","Net Income"]
-    st.dataframe(derived[show_cols], use_container_width=True)
+def build_display(df: pd.DataFrame, expanded: Dict[str,bool]) -> pd.DataFrame:
+    # Build a single table with rows:
+    # - Parent section row (shows SUM of child TOTALs)
+    # - Child account TOTAL row (editable CALC/ADJ are below it)
+    # -   Account · CALC  row (editable except locked months)
+    # -   Account · ADJ   row (editable except locked months)
+    df = recalc(df)
+    rows = []
+    # per-section subtotals
+    sec_sub = section_totals(df[df.Component=="TOTAL"])
+    for sec, accounts in SECTIONS:
+        parent = {"Indent":0, "RowType":"PARENT", "Line": sec, "Driver":"", "Param":""}
+        for m in MONTHS:
+            parent[m] = float(sec_sub[m].get(sec,0.0))
+        rows.append(parent)
 
-with t2:
-    pct_cols = ["Period"] + [c for c in derived.columns if c.endswith("%")]
-    st.dataframe(derived[pct_cols], use_container_width=True)
+        if expanded.get(sec, True):
+            for acc in accounts:
+                # TOTAL row for account
+                total_row = {"Indent":1, "RowType":"LEAF_TOTAL", "Line": acc, "Driver":"", "Param":""}
+                mask_tot = (df.Account==acc)&(df.Component=="TOTAL")
+                for m in MONTHS:
+                    total_row[m] = float(df.loc[mask_tot, m].sum())
+                rows.append(total_row)
 
-# Save edits
-st.session_state["grid"] = edited
+                # CALC row
+                calc_row = {"Indent":2, "RowType":"LEAF_CALC", "Line": f"{acc} · CALC", "Driver":"", "Param":""}
+                mask_calc = (df.Account==acc)&(df.Component=="CALC")
+                for m in MONTHS:
+                    calc_row[m] = float(df.loc[mask_calc, m].sum())
+                rows.append(calc_row)
 
-st.markdown("---")
-st.caption("Notes: Inputs shown in blue on the left (sidebar). In tables, expenses are negative. Common-size percentages are relative to Net Revenue.")
+                # ADJ row
+                adj_row = {"Indent":2, "RowType":"LEAF_ADJ", "Line": f"{acc} · ADJ", "Driver":"", "Param":""}
+                mask_adj = (df.Account==acc)&(df.Component=="MANUAL_ADJ")
+                for m in MONTHS:
+                    adj_row[m] = float(df.loc[mask_adj, m].sum())
+                rows.append(adj_row)
+
+    # computed lines at bottom
+    for name in COMPUTED_ORDER:
+        row = {"Indent":0, "RowType":"COMPUTED", "Line": name, "Driver":"", "Param":""}
+        for m in MONTHS:
+            sec_map = { s: float(df[(df.Component=="TOTAL")&(df.Section==s)][m].sum()) for s,_ in SECTIONS }
+            row[m] = computed_lines(sec_map)[name]
+        rows.append(row)
+
+    disp = pd.DataFrame(rows)
+    # nice label with indentation
+    def label(r):
+        bullet = ">> " if r["RowType"]=="PARENT" else ("  " * r["Indent"] + "- ")
+        return ("  " * r["Indent"]) + bullet + r["Line"]
+    disp["Account"] = disp.apply(label, axis=1)
+    cols = ["Account"] + MONTHS + ["RowType","Line","Indent"]
+    return disp[cols]
+
+st.title(APP_TITLE)
+st.caption("Rows = Accounts (hierarchical). Columns = Months. Parents show sums. Leaf CALC+ADJ roll to TOTAL. Jan–Mar are locked.")
+
+# init session
+if "cube" not in st.session_state:
+    st.session_state["cube"] = seed_cube()
+if "expanded" not in st.session_state:
+    st.session_state["expanded"] = {sec: True for sec,_ in SECTIONS}
+
+cube = st.session_state["cube"]
+expanded = st.session_state["expanded"]
+
+# Controls
+with st.sidebar:
+    st.header("View")
+    colA, colB = st.columns(2)
+    if colA.button("Expand all"):
+        for sec,_ in SECTIONS: expanded[sec] = True
+    if colB.button("Collapse all"):
+        for sec,_ in SECTIONS: expanded[sec] = False
+    st.write("Toggle sections:")
+    for sec,_ in SECTIONS:
+        expanded[sec] = st.toggle(sec, value=expanded[sec], key=f"exp_{sec}")
+
+display_df = build_display(cube, expanded)
+
+# Column config (we'll enforce locks on save)
+col_cfg = {m: st.column_config.NumberColumn() for m in MONTHS}
+
+edited = st.data_editor(
+    display_df,
+    use_container_width=True,
+    num_rows="fixed",
+    hide_index=True,
+    column_config=col_cfg
+)
+
+def apply_edits(original: pd.DataFrame, before_disp: pd.DataFrame, after_disp: pd.DataFrame) -> pd.DataFrame:
+    df = original.copy()
+    # Only LEAF_CALC and LEAF_ADJ are editable sources
+    for idx in range(len(after_disp)):
+        rt = after_disp.loc[idx, "RowType"]
+        label = after_disp.loc[idx, "Line"]
+        if rt not in ("LEAF_CALC","LEAF_ADJ"):
+            continue
+        if rt == "LEAF_CALC":
+            acc = label.replace(" · CALC","")
+            comp = "CALC"
+        else:
+            acc = label.replace(" · ADJ","")
+            comp = "MANUAL_ADJ"
+        for m in MONTHS:
+            if m in LOCKED:
+                continue
+            val = after_disp.loc[idx, m]
+            if pd.isna(val):
+                val = before_disp.loc[idx, m]
+            df.loc[(df.Account==acc)&(df.Component==comp), m] = float(val)
+    return df
+
+if st.button("Recalculate & Save", type="primary"):
+    updated = apply_edits(cube, display_df, edited)
+    updated = recalc(updated)
+    st.session_state["cube"] = updated
+    st.success("Recalculated. Parents & computed updated.")
