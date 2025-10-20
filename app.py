@@ -1,15 +1,15 @@
-import time
+import pandas as pd
+import requests
+import streamlit as st
 from dataclasses import dataclass
 from typing import Tuple, Optional
-import requests
-import pandas as pd
-import streamlit as st
 
-APP_TITLE = "Agentic Driver-Based Planning — P&L Grid v9 (Hierarchical + Single Grid)"
+APP_TITLE = "Agentic Driver-Based Planning — P&L Grid (No-AgGrid Stable)"
 DEFAULT_ENTITY = "Orvis"
 DEFAULT_CURRENCY = "USD"
+
 MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-ACTUALIZED_PERIODS = ["Jan","Feb","Mar"]
+ACTUALIZED_PERIODS = ["Jan","Feb","Mar"]  # lock these months
 
 MONTH_ALIASES = {
     "jan":"Jan","january":"Jan","01":"Jan","1":"Jan",
@@ -62,11 +62,9 @@ COMPUTED_LINES = [
     ("Pre-Tax Income",  lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0) - sec.get("Opex",0)) + sec.get("Other",0)),
     ("Net Income",      lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0) - sec.get("Opex",0) + sec.get("Other",0)) - sec.get("Taxes",0)),
 ]
-COMP_CHOICES = ["CALC","MANUAL_ADJ","TOTAL"]
-DRIVERS = ["MANUAL","PCT_GROWTH","PCT_OF_SALES","PY_RATIO_SALES","CPI_INDEXED","OIL_LINKED_FREIGHT","FX_CONVERTED_SALES"]
 
 @st.cache_data(ttl=3600)
-def fetch_cpi_yoy()->Tuple[float,str]: 
+def fetch_cpi_yoy()->Tuple[float,str]:
     return 0.022, "CPI YoY (demo) = 2.2%"
 
 @st.cache_data(ttl=3600)
@@ -74,7 +72,7 @@ def fetch_fx_rate(base:str,target:str)->Tuple[float,str]:
     try:
         r=requests.get(f"https://api.frankfurter.app/latest?from={base}&to={target}",timeout=10)
         if r.ok:
-            rate=float(r.json()["rates"][target]); 
+            rate=float(r.json()["rates"][target])
             return rate, f"FX {base}->{target} = {rate:.4f}"
     except Exception: ...
     return 1.08, "FX fallback = 1.08"
@@ -102,8 +100,7 @@ def demo_prior()->pd.DataFrame:
     return pd.DataFrame(rows)
 
 def seed_unified()->pd.DataFrame:
-    base=[]
-    order=0
+    base=[]; order=0
     for section, accounts in PRESENTATION_ORDER:
         for acc in accounts:
             meta = next((d for d in DEFAULT_LINES if d["Account"]==acc), None)
@@ -202,15 +199,21 @@ def recalc(df_long: pd.DataFrame, prior_df: pd.DataFrame, ctx: Ctx, actuals_pivo
 
     for m in MONTHS:
         sec = { t: float(df[(df["RowType"]=="SUBTOTAL")&(df["Type"]==t)&(df["Period"]==m)]["Value"].sum()) for t in ACCOUNT_TYPES }
-        for name, formula in COMPUTED_LINES:
+        for name, formula in COMPTED := [
+            ("Gross Profit",    lambda sec: sec.get("Revenue",0) - sec.get("COGS",0)),
+            ("EBITDA",          lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0)) - (sec.get("Opex",0) - 0.0)),
+            ("Operating Income",lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0)) - sec.get("Opex",0)),
+            ("Pre-Tax Income",  lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0) - sec.get("Opex",0)) + sec.get("Other",0)),
+            ("Net Income",      lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0) - sec.get("Opex",0) + sec.get("Other",0)) - sec.get("Taxes",0)),
+        ]:
             val=float(formula(sec))
             df.loc[(df["RowType"]=="COMPUTED")&(df["Account"]==name)&(df["Period"]==m),"Value"]=val
     return df
 
-# UI
+# ---------- UI ----------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
-st.caption("Single grid with indentation & shading. Edit LINE rows for Apr–Dec. Jan–Mar locked. SUBTOTAL/COMPUTED read-only.")
+st.caption("Single grid. Hierarchical P&L. Jan–Mar locked. SUBTOTAL/COMPUTED read-only. LINE TOTAL = CALC + MANUAL_ADJ. Edit Apr–Dec for CALC/MANUAL_ADJ rows.")
 
 with st.sidebar:
     st.header("Configuration")
@@ -222,29 +225,20 @@ with st.sidebar:
     st.write(cpi_info); st.write(fx_info); st.write(oil_info)
 
 @dataclass
-class Ctx:
-    entity:str
-    currency:str
-    cpi_yoy:float
-    fx_eur_to_target:float
-    oil_ratio:float
-
-ctx = Ctx(entity=entity, currency=currency, cpi_yoy=cpi, fx_eur_to_target=fx_rate, oil_ratio=oil_ratio)
+class CtxObj:
+    entity:str; currency:str; cpi_yoy:float; fx_eur_to_target:float; oil_ratio:float
+ctx = CtxObj(entity, currency, cpi, fx_rate, oil_ratio)
 
 prior_df = demo_prior()
 prior_df["Period"]=prior_df["Period"].apply(_norm_period)
 actuals_df = prior_df[prior_df["Period"].isin(ACTUALIZED_PERIODS)].copy()
 actuals_pivot = actuals_df.pivot_table(index=["Account","Type"], columns="Period", values="Value", aggfunc="sum")
 
-if "unified" not in st.session_state:
-    st.session_state["unified"] = seed_unified()
+def build_unified_if_needed():
+    if "unified" not in st.session_state:
+        st.session_state["unified"] = seed_unified()
+build_unified_if_needed()
 unified = st.session_state["unified"].copy()
-
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
-
-SHADE_SUBTOTAL = "#f3f4f6"
-SHADE_COMPUTED = "#eef2ff"
-SHADE_LINE     = "#ffffff"
 
 def build_display_df(unified_df: pd.DataFrame) -> pd.DataFrame:
     wide = unified_df.pivot_table(
@@ -253,106 +247,71 @@ def build_display_df(unified_df: pd.DataFrame) -> pd.DataFrame:
         values="Value",
         aggfunc="sum"
     ).reindex(columns=MONTHS, fill_value=0.0).reset_index()
+
+    # label with lightweight indentation markers
     def label_row(r):
         indent = "   " if r["RowType"] == "LINE" else ""
         base = f"{indent}{r['Account']}"
         if r["RowType"] == "LINE" and r["Component"] in ("CALC", "MANUAL_ADJ"):
             base += f"  · {r['Component']}"
         return base
-    wide["Display"] = wide.apply(label_row, axis=1)
-    wide = wide.sort_values(["Order","RowType","Account","Component"]).reset_index(drop=True)
-    return wide
 
-def aggrid_pl(wide_df: pd.DataFrame):
-    numeric_months = [c for c in wide_df.columns if c in MONTHS]
-    gb = GridOptionsBuilder.from_dataframe(
-        wide_df[["Display","RowType","Type","Account","Component","Driver","Param"] + numeric_months],
-        enableRowGroup=False, enableValue=False, enablePivot=False
-    )
-    for col in ["RowType","Type","Account","Component","Driver","Param"]:
-        gb.configure_column(col, editable=False)
-    gb.configure_column("Display", header_name="P&L", editable=False, pinned="left", width=320)
-    editable_js = JsCode(f"""
-        function(params) {{
-            const rt = params.data.RowType;
-            const comp = params.data.Component;
-            const month = params.colDef.field;
-            const locked = {ACTUALIZED_PERIODS};
-            if (rt !== 'LINE') return false;
-            if (comp === 'TOTAL') return false;
-            if (locked.includes(month)) return false;
-            return true;
-        }}
-    """)
-    cell_style_js = JsCode(f"""
-        function(params) {{
-            const rt = params.data.RowType;
-            let style = {{}};
-            if (rt === 'SUBTOTAL') {{
-                style = {{'backgroundColor': '{SHADE_SUBTOTAL}', 'fontWeight':'600'}};
-            }} else if (rt === 'COMPUTED') {{
-                style = {{'backgroundColor': '{SHADE_COMPUTED}', 'fontWeight':'600'}};
-            }} else {{
-                style = {{'backgroundColor': '{SHADE_LINE}'}};
-            }}
-            return style;
-        }}
-    """)
-    for m in numeric_months:
-        gb.configure_column(
-            m,
-            type=["numericColumn"],
-            valueFormatter=JsCode("function(p){return (p.value===undefined||p.value===null)?'':Number(p.value).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});}"),
-            editable=editable_js,
-            cellStyle=cell_style_js
-        )
-    for meta in ["Display","RowType","Type","Account","Component","Driver","Param"]:
-        gb.configure_column(meta, cellStyle=cell_style_js)
-    gb.configure_grid_options(suppressMenuHide=True,rowSelection="single",animateRows=True,enableRangeSelection=True)
-    grid_options = gb.build()
-    grid_response = AgGrid(
-        wide_df,
-        gridOptions=grid_options,
-        data_return_mode=DataReturnMode.AS_INPUT,
-        update_mode=GridUpdateMode.VALUE_CHANGED,
-        fit_columns_on_grid_load=False,
-        enable_enterprise_modules=False,
-        height=600
-    )
-    return grid_response["data"]
+    wide["P&L"] = wide.apply(label_row, axis=1)
+    wide = wide.sort_values(["Order","RowType","Account","Component"]).reset_index(drop=True)
+    cols = ["P&L","RowType","Type","Account","Component","Driver","Param"] + MONTHS
+    for m in MONTHS:
+        if m not in wide.columns: wide[m]=0.0
+    return wide[cols]
 
 st.subheader("Unified P&L Grid")
+
 display_df = build_display_df(unified)
-edited_df = aggrid_pl(display_df)
-st.caption("Shaded rows = SUBTOTAL (gray) & COMPUTED (indigo). Indented rows are accounts; CALC/MANUAL ADJ under each account. Edit Apr–Dec; Recalculate updates in-place.")
+
+# Streamlit editor (no per-cell disable; we enforce locks on recalc)
+edited_df = st.data_editor(
+    display_df,
+    use_container_width=True,
+    num_rows="dynamic",
+    column_config={
+        # lock Jan–Mar by making them visually read-only (we'll also enforce on recalc)
+        "Jan": st.column_config.NumberColumn(disabled=True),
+        "Feb": st.column_config.NumberColumn(disabled=True),
+        "Mar": st.column_config.NumberColumn(disabled=True),
+    }
+)
+
+st.caption("Note: Jan–Mar are locked; SUBTOTAL/COMPUTED and LINE TOTAL will be overwritten by the Recalculate step.")
 
 if st.button("Recalculate", type="primary"):
     long = edited_df.melt(
-        id_vars=["Order","RowType","Type","Account","Component","Driver","Param","Display"],
+        id_vars=["Order","RowType","Type","Account","Component","Driver","Param","P&L"],
         value_vars=[c for c in edited_df.columns if c in MONTHS],
         var_name="Period",
         value_name="Value"
-    ).drop(columns=["Display"])
+    ).drop(columns=["P&L"])
     long["Value"] = pd.to_numeric(long["Value"], errors="coerce").fillna(0.0)
     long["Period"]= long["Period"].apply(_norm_period)
 
     prev = st.session_state["unified"]
     join = ["Order","RowType","Type","Account","Component","Driver","Param","Period"]
+
+    # 1) Enforce Jan–Mar lock
     merged = long.merge(prev[join+["Value"]].rename(columns={"Value":"Prev"}), on=join, how="left")
     is_locked_month = merged["Period"].isin(ACTUALIZED_PERIODS)
     merged.loc[is_locked_month, "Value"] = merged.loc[is_locked_month, "Prev"].fillna(merged.loc[is_locked_month, "Value"])
     merged = merged.drop(columns=["Prev"])
 
-    locked_mask = (merged["RowType"].isin(["SUBTOTAL","COMPUTED"])) | ((merged["RowType"]=="LINE") & (merged["Component"]=="TOTAL"))
+    # 2) Enforce read-only rows: SUBTOTAL, COMPUTED, LINE TOTAL
+    ro_mask = (merged["RowType"].isin(["SUBTOTAL","COMPUTED"])) | ((merged["RowType"]=="LINE") & (merged["Component"]=="TOTAL"))
     merged = merged.merge(prev[join+["Value"]].rename(columns={"Value":"Prev2"}), on=join, how="left")
-    merged.loc[locked_mask, "Value"] = merged.loc[locked_mask, "Prev2"].fillna(merged.loc[locked_mask, "Value"])
+    merged.loc[ro_mask, "Value"] = merged.loc[ro_mask, "Prev2"].fillna(merged.loc[ro_mask, "Value"])
     merged = merged.drop(columns=["Prev2"])
 
-    # Compute & store
+    # 3) Compute
     out = recalc(merged, prior_df, ctx, actuals_pivot)
     st.session_state["unified"] = out
 
-    # Rerun to refresh this same grid
+    # Rerun to refresh grid
     if hasattr(st, "rerun"):
         st.rerun()
     elif hasattr(st, "experimental_rerun"):
