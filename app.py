@@ -4,9 +4,9 @@ import pandas as pd
 from dataclasses import dataclass
 from typing import Dict, List
 
-st.set_page_config(page_title="Agentic Driver-Based Planning — v12 (Months Across)", layout="wide")
+st.set_page_config(page_title="Agentic Driver-Based Planning — v12.1 (Months Across, Jan–Mar Locked)", layout="wide")
 
-APP_TITLE = "Agentic Driver-Based Planning — Hierarchical P&L v12 (Months Across)"
+APP_TITLE = "Agentic Driver-Based Planning — Hierarchical P&L v12.1 (Months Across)"
 MONTHS: List[str] = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 LOCKED = {"Jan","Feb","Mar"}  # actualized (read-only)
 
@@ -41,6 +41,23 @@ DEFAULT_DRIVERS: Dict[str, LineMeta] = {
 
 COMPUTED_ORDER = ["Gross Profit","Operating Income","Pre-Tax Income","Net Income"]
 
+# ---- Seed actuals for Jan–Mar across multiple accounts (demo) ----
+ACTUALS = {
+    "Sales":               {"Jan": 120000.0, "Feb": 118000.0, "Mar": 119500.0},
+    "Returns & Allowances":{"Jan":  -2400.0, "Feb":  -2360.0, "Mar":  -2390.0},
+    "Royalty Income":      {"Jan":   3100.0, "Feb":   3200.0, "Mar":   3150.0},
+    "COGS":                {"Jan": -55000.0, "Feb": -60500.0, "Mar": -58000.0},
+    "Freight":             {"Jan":  -8000.0, "Feb":  -8300.0, "Mar":  -8200.0},
+    "Fulfillment":         {"Jan":  -5000.0, "Feb":  -5200.0, "Mar":  -5100.0},
+    "Marketing":           {"Jan":  -7000.0, "Feb":  -6800.0, "Mar":  -6900.0},
+    "Payroll":             {"Jan": -12000.0, "Feb": -12150.0, "Mar": -12200.0},
+    "G&A":                 {"Jan":  -6000.0, "Feb":  -6100.0, "Mar":  -6050.0},
+    "Depreciation":        {"Jan":  -1500.0, "Feb":  -1500.0, "Mar":  -1500.0},
+    "Other Income":        {"Jan":   1000.0, "Feb":   1000.0, "Mar":   1000.0},
+    "Interest Expense":    {"Jan":  -4200.0, "Feb":  -4200.0, "Mar":  -4200.0},
+    "Taxes":               {"Jan":  -3500.0, "Feb":  -3600.0, "Mar":  -3550.0},
+}
+
 def seed_cube()->pd.DataFrame:
     rows = []
     order = 0
@@ -58,8 +75,10 @@ def seed_cube()->pd.DataFrame:
                 rows.append(row)
             order += 1
     df = pd.DataFrame(rows)
-    # Seed Jan–Mar Sales CALC (actualized feel)
-    df.loc[(df.Account=="Sales")&(df.Component=="CALC"), ["Jan","Feb","Mar"]] = [120000.0,118000.0,119500.0]
+    # Seed Jan–Mar CALC from ACTUALS for all leaf accounts
+    for acc, months in ACTUALS.items():
+        for m, val in months.items():
+            df.loc[(df.Account==acc)&(df.Component=="CALC"), m] = float(val)
     return df
 
 def recalc(df: pd.DataFrame) -> pd.DataFrame:
@@ -89,11 +108,6 @@ def computed_lines(sec_map):
     return out
 
 def build_display(df: pd.DataFrame, expanded: Dict[str,bool]) -> pd.DataFrame:
-    # Build a single table with rows:
-    # - Parent section row (shows SUM of child TOTALs)
-    # - Child account TOTAL row (editable CALC/ADJ are below it)
-    # -   Account · CALC  row (editable except locked months)
-    # -   Account · ADJ   row (editable except locked months)
     df = recalc(df)
     rows = []
     # per-section subtotals
@@ -128,7 +142,7 @@ def build_display(df: pd.DataFrame, expanded: Dict[str,bool]) -> pd.DataFrame:
                 rows.append(adj_row)
 
     # computed lines at bottom
-    for name in COMPUTED_ORDER:
+    for name in ["Gross Profit","Operating Income","Pre-Tax Income","Net Income"]:
         row = {"Indent":0, "RowType":"COMPUTED", "Line": name, "Driver":"", "Param":""}
         for m in MONTHS:
             sec_map = { s: float(df[(df.Component=="TOTAL")&(df.Section==s)][m].sum()) for s,_ in SECTIONS }
@@ -136,7 +150,7 @@ def build_display(df: pd.DataFrame, expanded: Dict[str,bool]) -> pd.DataFrame:
         rows.append(row)
 
     disp = pd.DataFrame(rows)
-    # nice label with indentation
+    # render label with indentation
     def label(r):
         bullet = ">> " if r["RowType"]=="PARENT" else ("  " * r["Indent"] + "- ")
         return ("  " * r["Indent"]) + bullet + r["Line"]
@@ -145,7 +159,7 @@ def build_display(df: pd.DataFrame, expanded: Dict[str,bool]) -> pd.DataFrame:
     return disp[cols]
 
 st.title(APP_TITLE)
-st.caption("Rows = Accounts (hierarchical). Columns = Months. Parents show sums. Leaf CALC+ADJ roll to TOTAL. Jan–Mar are locked.")
+st.caption("Rows = Accounts (hierarchical). Columns = Months. Parents sum children. CALC+ADJ -> TOTAL. Jan–Mar are seeded as ACTUALS and hard-locked (non-editable).")
 
 # init session
 if "cube" not in st.session_state:
@@ -156,7 +170,7 @@ if "expanded" not in st.session_state:
 cube = st.session_state["cube"]
 expanded = st.session_state["expanded"]
 
-# Controls
+# Sidebar controls
 with st.sidebar:
     st.header("View")
     colA, colB = st.columns(2)
@@ -164,14 +178,19 @@ with st.sidebar:
         for sec,_ in SECTIONS: expanded[sec] = True
     if colB.button("Collapse all"):
         for sec,_ in SECTIONS: expanded[sec] = False
-    st.write("Toggle sections:")
     for sec,_ in SECTIONS:
         expanded[sec] = st.toggle(sec, value=expanded[sec], key=f"exp_{sec}")
 
+# Build table
 display_df = build_display(cube, expanded)
 
-# Column config (we'll enforce locks on save)
-col_cfg = {m: st.column_config.NumberColumn() for m in MONTHS}
+# Column config: explicitly disable Jan–Mar across all rows (visual + interaction lock)
+col_cfg = {}
+for m in MONTHS:
+    if m in LOCKED:
+        col_cfg[m] = st.column_config.NumberColumn(disabled=True)
+    else:
+        col_cfg[m] = st.column_config.NumberColumn()
 
 edited = st.data_editor(
     display_df,
@@ -181,9 +200,11 @@ edited = st.data_editor(
     column_config=col_cfg
 )
 
+# Apply edits back to the cube with rules:
+# - Only LEAF_CALC and LEAF_ADJ rows are sources
+# - Months in LOCKED are ignored (kept as ACTUALS)
 def apply_edits(original: pd.DataFrame, before_disp: pd.DataFrame, after_disp: pd.DataFrame) -> pd.DataFrame:
     df = original.copy()
-    # Only LEAF_CALC and LEAF_ADJ are editable sources
     for idx in range(len(after_disp)):
         rt = after_disp.loc[idx, "RowType"]
         label = after_disp.loc[idx, "Line"]
@@ -197,7 +218,7 @@ def apply_edits(original: pd.DataFrame, before_disp: pd.DataFrame, after_disp: p
             comp = "MANUAL_ADJ"
         for m in MONTHS:
             if m in LOCKED:
-                continue
+                continue  # keep actuals
             val = after_disp.loc[idx, m]
             if pd.isna(val):
                 val = before_disp.loc[idx, m]
@@ -208,4 +229,4 @@ if st.button("Recalculate & Save", type="primary"):
     updated = apply_edits(cube, display_df, edited)
     updated = recalc(updated)
     st.session_state["cube"] = updated
-    st.success("Recalculated. Parents & computed updated.")
+    st.success("Recalculated. Parents & computed updated. Jan–Mar remained locked as actuals.")
