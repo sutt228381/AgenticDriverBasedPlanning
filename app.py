@@ -1,14 +1,34 @@
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-st.set_page_config(page_title="Agentic Driver-Based Planning — v12.1 (Months Across, Jan–Mar Locked)", layout="wide")
+st.set_page_config(page_title="Agentic Driver-Based Planning — v13 (Dimensional CSV → P&L)", layout="wide")
 
-APP_TITLE = "Agentic Driver-Based Planning — Hierarchical P&L v12.1 (Months Across)"
+APP_TITLE = "Agentic Driver-Based Planning — v13 (Upload CSV, Slice by Dimensions, AI Driver Hints)"
 MONTHS: List[str] = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-LOCKED = {"Jan","Feb","Mar"}  # actualized (read-only)
+MONTH_ALIASES = {
+    "jan":"Jan","january":"Jan","01":"Jan","1":"Jan",
+    "feb":"Feb","february":"Feb","02":"Feb","2":"Feb",
+    "mar":"Mar","march":"Mar","03":"Mar","3":"Mar",
+    "apr":"Apr","april":"Apr","04":"Apr","4":"Apr",
+    "may":"May","05":"May","5":"May",
+    "jun":"Jun","june":"Jun","06":"Jun","6":"Jun",
+    "jul":"Jul","july":"Jul","07":"Jul","7":"Jul",
+    "aug":"Aug","august":"Aug","08":"Aug","8":"Aug",
+    "sep":"Sep","sept":"Sep","september":"Sep","09":"Sep","9":"Sep",
+    "oct":"Oct","october":"Oct","10":"Oct",
+    "nov":"Nov","november":"Nov","11":"Nov",
+    "dec":"Dec","december":"Dec","12":"Dec",
+}
+def norm_period(x:str)->str:
+    if x is None: return ""
+    s=str(x).strip().lower()
+    if s in MONTH_ALIASES: return MONTH_ALIASES[s]
+    if s[:3] in MONTH_ALIASES: return MONTH_ALIASES[s[:3]]
+    return s[:3].title()
 
 SECTIONS = [
     ("Revenue", ["Sales","Returns & Allowances","Royalty Income"]),
@@ -17,6 +37,8 @@ SECTIONS = [
     ("Other",   ["Other Income","Interest Expense"]),
     ("Taxes",   ["Taxes"]),
 ]
+ACCOUNT_TO_SECTION = {acc:sec for sec, accs in SECTIONS for acc in accs}
+COMPUTED_ORDER = ["Gross Profit","Operating Income","Pre-Tax Income","Net Income"]
 
 @dataclass
 class LineMeta:
@@ -39,194 +61,243 @@ DEFAULT_DRIVERS: Dict[str, LineMeta] = {
     "Taxes": LineMeta("MANUAL","Amount"),
 }
 
-COMPUTED_ORDER = ["Gross Profit","Operating Income","Pre-Tax Income","Net Income"]
-
-# ---- Seed actuals for Jan–Mar across multiple accounts (demo) ----
-ACTUALS = {
-    "Sales":               {"Jan": 120000.0, "Feb": 118000.0, "Mar": 119500.0},
-    "Returns & Allowances":{"Jan":  -2400.0, "Feb":  -2360.0, "Mar":  -2390.0},
-    "Royalty Income":      {"Jan":   3100.0, "Feb":   3200.0, "Mar":   3150.0},
-    "COGS":                {"Jan": -55000.0, "Feb": -60500.0, "Mar": -58000.0},
-    "Freight":             {"Jan":  -8000.0, "Feb":  -8300.0, "Mar":  -8200.0},
-    "Fulfillment":         {"Jan":  -5000.0, "Feb":  -5200.0, "Mar":  -5100.0},
-    "Marketing":           {"Jan":  -7000.0, "Feb":  -6800.0, "Mar":  -6900.0},
-    "Payroll":             {"Jan": -12000.0, "Feb": -12150.0, "Mar": -12200.0},
-    "G&A":                 {"Jan":  -6000.0, "Feb":  -6100.0, "Mar":  -6050.0},
-    "Depreciation":        {"Jan":  -1500.0, "Feb":  -1500.0, "Mar":  -1500.0},
-    "Other Income":        {"Jan":   1000.0, "Feb":   1000.0, "Mar":   1000.0},
-    "Interest Expense":    {"Jan":  -4200.0, "Feb":  -4200.0, "Mar":  -4200.0},
-    "Taxes":               {"Jan":  -3500.0, "Feb":  -3600.0, "Mar":  -3550.0},
-}
-
-def seed_cube()->pd.DataFrame:
-    rows = []
-    order = 0
-    for sec, accounts in SECTIONS:
-        for acc in accounts:
-            meta = DEFAULT_DRIVERS[acc]
-            for comp in ["CALC","MANUAL_ADJ","TOTAL"]:
-                row = {
-                    "Order": order, "Section": sec, "Account": acc, "Component": comp,
-                    "Driver": meta.driver if comp=="CALC" else "MANUAL",
-                    "Param":  meta.param if comp=="CALC" else "Adj",
-                }
-                for m in MONTHS:
-                    row[m] = 0.0
-                rows.append(row)
-            order += 1
-    df = pd.DataFrame(rows)
-    # Seed Jan–Mar CALC from ACTUALS for all leaf accounts
-    for acc, months in ACTUALS.items():
-        for m, val in months.items():
-            df.loc[(df.Account==acc)&(df.Component=="CALC"), m] = float(val)
-    return df
-
-def recalc(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    # TOTAL = CALC + MANUAL_ADJ (for all months)
-    for m in MONTHS:
-        out.loc[out.Component=="TOTAL", m] = (
-            out.loc[out.Component=="CALC", m].values + out.loc[out.Component=="MANUAL_ADJ", m].values
-        )
-    return out
-
-def section_totals(df_total: pd.DataFrame):
-    # returns {month: {section: value}}
-    res = {m:{} for m in MONTHS}
-    for sec, _ in SECTIONS:
-        mask = (df_total["Component"]=="TOTAL") & (df_total["Section"]==sec)
-        for m in MONTHS:
-            res[m][sec] = float(df_total.loc[mask, m].sum())
-    return res
-
-def computed_lines(sec_map):
-    out = {}
-    out["Gross Profit"]     = sec_map.get("Revenue",0.0) - sec_map.get("COGS",0.0)
-    out["Operating Income"] = out["Gross Profit"] - sec_map.get("Opex",0.0)
-    out["Pre-Tax Income"]   = out["Operating Income"] + sec_map.get("Other",0.0)
-    out["Net Income"]       = out["Pre-Tax Income"] - sec_map.get("Taxes",0.0)
-    return out
-
-def build_display(df: pd.DataFrame, expanded: Dict[str,bool]) -> pd.DataFrame:
-    df = recalc(df)
-    rows = []
-    # per-section subtotals
-    sec_sub = section_totals(df[df.Component=="TOTAL"])
-    for sec, accounts in SECTIONS:
-        parent = {"Indent":0, "RowType":"PARENT", "Line": sec, "Driver":"", "Param":""}
-        for m in MONTHS:
-            parent[m] = float(sec_sub[m].get(sec,0.0))
-        rows.append(parent)
-
-        if expanded.get(sec, True):
-            for acc in accounts:
-                # TOTAL row for account
-                total_row = {"Indent":1, "RowType":"LEAF_TOTAL", "Line": acc, "Driver":"", "Param":""}
-                mask_tot = (df.Account==acc)&(df.Component=="TOTAL")
-                for m in MONTHS:
-                    total_row[m] = float(df.loc[mask_tot, m].sum())
-                rows.append(total_row)
-
-                # CALC row
-                calc_row = {"Indent":2, "RowType":"LEAF_CALC", "Line": f"{acc} · CALC", "Driver":"", "Param":""}
-                mask_calc = (df.Account==acc)&(df.Component=="CALC")
-                for m in MONTHS:
-                    calc_row[m] = float(df.loc[mask_calc, m].sum())
-                rows.append(calc_row)
-
-                # ADJ row
-                adj_row = {"Indent":2, "RowType":"LEAF_ADJ", "Line": f"{acc} · ADJ", "Driver":"", "Param":""}
-                mask_adj = (df.Account==acc)&(df.Component=="MANUAL_ADJ")
-                for m in MONTHS:
-                    adj_row[m] = float(df.loc[mask_adj, m].sum())
-                rows.append(adj_row)
-
-    # computed lines at bottom
-    for name in ["Gross Profit","Operating Income","Pre-Tax Income","Net Income"]:
-        row = {"Indent":0, "RowType":"COMPUTED", "Line": name, "Driver":"", "Param":""}
-        for m in MONTHS:
-            sec_map = { s: float(df[(df.Component=="TOTAL")&(df.Section==s)][m].sum()) for s,_ in SECTIONS }
-            row[m] = computed_lines(sec_map)[name]
-        rows.append(row)
-
-    disp = pd.DataFrame(rows)
-    # render label with indentation
-    def label(r):
-        bullet = ">> " if r["RowType"]=="PARENT" else ("  " * r["Indent"] + "- ")
-        return ("  " * r["Indent"]) + bullet + r["Line"]
-    disp["Account"] = disp.apply(label, axis=1)
-    cols = ["Account"] + MONTHS + ["RowType","Line","Indent"]
-    return disp[cols]
-
+# ---------------- UI Header ----------------
 st.title(APP_TITLE)
-st.caption("Rows = Accounts (hierarchical). Columns = Months. Parents sum children. CALC+ADJ -> TOTAL. Jan–Mar are seeded as ACTUALS and hard-locked (non-editable).")
+st.caption("Upload a comma‑delimited P&L with extra dimensions (Product, Entity, Channel, Currency). We'll ingest, total at the top, and let you slice by dimensions. Then we suggest drivers per account/dimension combo.")
 
-# init session
-if "cube" not in st.session_state:
-    st.session_state["cube"] = seed_cube()
-if "expanded" not in st.session_state:
-    st.session_state["expanded"] = {sec: True for sec,_ in SECTIONS}
+# ---------------- Upload & Schema Mapping ----------------
+with st.expander("1) Upload CSV & map columns", expanded=True):
+    f = st.file_uploader("CSV file", type=["csv"])
+    if f is not None:
+        raw = pd.read_csv(f)
+        st.write("Preview:", raw.head())
 
-cube = st.session_state["cube"]
-expanded = st.session_state["expanded"]
+        cols = list(raw.columns)
+        col_account = st.selectbox("Account column", cols)
+        col_period  = st.selectbox("Period column (month name/number)", cols)
+        col_value   = st.selectbox("Value/Amount column", cols)
+        col_entity  = st.selectbox("Entity column (optional)", ["<none>"] + cols)
+        col_product = st.selectbox("Product column (optional)", ["<none>"] + cols)
+        col_channel = st.selectbox("Channel column (optional)", ["<none>"] + cols)
+        col_currency= st.selectbox("Currency column (optional)", ["<none>"] + cols)
 
-# Sidebar controls
-with st.sidebar:
-    st.header("View")
-    colA, colB = st.columns(2)
-    if colA.button("Expand all"):
-        for sec,_ in SECTIONS: expanded[sec] = True
-    if colB.button("Collapse all"):
-        for sec,_ in SECTIONS: expanded[sec] = False
-    for sec,_ in SECTIONS:
-        expanded[sec] = st.toggle(sec, value=expanded[sec], key=f"exp_{sec}")
+        # normalize and store
+        df = raw.copy()
+        df["Account"] = df[col_account].astype(str).str.strip()
+        df["Period"]  = df[col_period].apply(norm_period)
+        df["Value"]   = pd.to_numeric(df[col_value], errors="coerce").fillna(0.0)
+        if col_entity != "<none>":  df["Entity"]= raw[col_entity].astype(str)
+        else:                        df["Entity"]= "All"
+        if col_product != "<none>": df["Product"]= raw[col_product].astype(str)
+        else:                        df["Product"]= "All"
+        if col_channel != "<none>": df["Channel"]= raw[col_channel].astype(str)
+        else:                        df["Channel"]= "All"
+        if col_currency != "<none>":df["Currency"]= raw[col_currency].astype(str)
+        else:                        df["Currency"]= "USD"
 
-# Build table
-display_df = build_display(cube, expanded)
+        # Map to standard accounts (if novel accounts appear, keep them in Opex as default)
+        df["Section"] = df["Account"].map(lambda a: ACCOUNT_TO_SECTION.get(a, "Opex"))
 
-# Column config: explicitly disable Jan–Mar across all rows (visual + interaction lock)
-col_cfg = {}
-for m in MONTHS:
-    if m in LOCKED:
-        col_cfg[m] = st.column_config.NumberColumn(disabled=True)
-    else:
-        col_cfg[m] = st.column_config.NumberColumn()
+        # Keep only known months
+        df = df[df["Period"].isin(MONTHS)].copy()
 
-edited = st.data_editor(
-    display_df,
-    use_container_width=True,
-    num_rows="fixed",
-    hide_index=True,
-    column_config=col_cfg
-)
+        st.session_state["uploaded_df"] = df
 
-# Apply edits back to the cube with rules:
-# - Only LEAF_CALC and LEAF_ADJ rows are sources
-# - Months in LOCKED are ignored (kept as ACTUALS)
-def apply_edits(original: pd.DataFrame, before_disp: pd.DataFrame, after_disp: pd.DataFrame) -> pd.DataFrame:
-    df = original.copy()
-    for idx in range(len(after_disp)):
-        rt = after_disp.loc[idx, "RowType"]
-        label = after_disp.loc[idx, "Line"]
-        if rt not in ("LEAF_CALC","LEAF_ADJ"):
-            continue
-        if rt == "LEAF_CALC":
-            acc = label.replace(" · CALC","")
-            comp = "CALC"
-        else:
-            acc = label.replace(" · ADJ","")
-            comp = "MANUAL_ADJ"
+# ---------------- Filters & Actuals Cutoff ----------------
+if "uploaded_df" in st.session_state:
+    src = st.session_state["uploaded_df"]
+    with st.expander("2) Filters & settings", expanded=True):
+        ent = st.multiselect("Entity", sorted(src["Entity"].unique().tolist()), default=sorted(src["Entity"].unique().tolist()))
+        prod= st.multiselect("Product", sorted(src["Product"].unique().tolist()), default=sorted(src["Product"].unique().tolist()))
+        chan= st.multiselect("Channel", sorted(src["Channel"].unique().tolist()), default=sorted(src["Channel"].unique().tolist()))
+        tgt_ccy = st.selectbox("Target currency", ["USD","EUR","GBP"], index=0, help="Simple 1:1 unless you enter an override below")
+        fx_override = st.number_input("FX override (multiply values)", value=1.0, step=0.01, help="Set e.g. 1.08 for EUR→USD")
+
+        cutoff = st.selectbox("Actuals cutoff month (inclusive — locked)", MONTHS, index=2)  # default Mar
+        locked_set = set(MONTHS[:MONTHS.index(cutoff)+1])
+
+    # slice
+    sliced = src[src["Entity"].isin(ent) & src["Product"].isin(prod) & src["Channel"].isin(chan)].copy()
+    # currency handling (simple, user-controlled)
+    sliced["Value"] = sliced["Value"] * fx_override
+
+    # pivot to month-wide by Account
+    by_acc = sliced.pivot_table(index=["Section","Account"], columns="Period", values="Value", aggfunc="sum").reindex(columns=MONTHS, fill_value=0.0)
+
+    # seed cube structure for CALC/ADJ/TOTAL by leaf
+    def seed_from_actuals(by_acc: pd.DataFrame)->pd.DataFrame:
+        rows=[]
+        order=0
+        for sec, accs in SECTIONS:
+            for acc in accs:
+                base = by_acc.loc[(sec, acc)] if (sec,acc) in by_acc.index else pd.Series(0.0,index=MONTHS)
+                for comp in ["CALC","MANUAL_ADJ","TOTAL"]:
+                    row = {"Order":order,"Section":sec,"Account":acc,"Component":comp}
+                    for m in MONTHS:
+                        if comp=="CALC":  row[m]= float(base.get(m,0.0))
+                        else:             row[m]= 0.0
+                    rows.append(row)
+                order+=1
+        return pd.DataFrame(rows)
+
+    if "cube" not in st.session_state:
+        st.session_state["cube"] = seed_from_actuals(by_acc)
+
+    # Show totals top-line for context
+    st.subheader("Top-line totals (current slice)")
+    totals = by_acc.groupby(level=0).sum()
+    st.dataframe(totals.style.format("{:,.0f}"), use_container_width=True)
+
+    # ---------------- Insights: heuristic driver suggestions ----------------
+    with st.expander("3) Driver suggestions (heuristic)", expanded=False):
+        st.write("We infer drivers per Account × Channel/Product combination based on names and patterns (no external data).")
+        # simple naming heuristics
+        def suggest(acc:str, channel:str, product:str)->str:
+            a=acc.lower(); ch=str(channel).lower(); pr=str(product).lower()
+            if "freight" in a or "shipping" in a or "postage" in a or "magazine" in ch:
+                return "OIL_LINKED_FREIGHT"
+            if a in ["payroll","g&a","g&a","general & administrative","general and administrative"] or "salary" in a:
+                return "CPI_INDEXED"
+            if "marketing" in a or "ad" in a:
+                return "PCT_OF_SALES"
+            if "return" in a:
+                return "PCT_OF_SALES (negative)"
+            if "royalty" in a:
+                return "PY_RATIO_SALES"
+            if acc=="COGS":
+                return "PCT_GROWTH"
+            if acc=="Sales":
+                return "MANUAL"
+            return "MANUAL"
+        # build a small table by channel/product showing suggestions
+        dim = sliced.groupby(["Account","Channel","Product"])["Value"].sum().reset_index()
+        dim["Suggested Driver"] = dim.apply(lambda r: suggest(r["Account"], r["Channel"], r["Product"]), axis=1)
+        st.dataframe(dim.sort_values(["Account","Channel","Product"]).reset_index(drop=True), use_container_width=True)
+        st.caption("Example: Revenue in **Magazine** channel flagged for **OIL_LINKED_FREIGHT** due to postage/shipping sensitivity.")
+
+    # ---------------- Hierarchical months-across grid ----------------
+    st.subheader("4) P&L Grid — Months Across (CALC + ADJ → TOTAL)")
+
+    cube = st.session_state["cube"]
+    # recalc TOTAL
+    def recalc(df: pd.DataFrame)->pd.DataFrame:
+        out = df.copy()
         for m in MONTHS:
-            if m in LOCKED:
-                continue  # keep actuals
-            val = after_disp.loc[idx, m]
-            if pd.isna(val):
-                val = before_disp.loc[idx, m]
-            df.loc[(df.Account==acc)&(df.Component==comp), m] = float(val)
-    return df
+            out.loc[out["Component"]=="TOTAL", m] = (
+                out.loc[out["Component"]=="CALC", m].values + out.loc[out["Component"]=="MANUAL_ADJ", m].values
+            )
+        return out
+    cube = recalc(cube)
 
-if st.button("Recalculate & Save", type="primary"):
-    updated = apply_edits(cube, display_df, edited)
-    updated = recalc(updated)
-    st.session_state["cube"] = updated
-    st.success("Recalculated. Parents & computed updated. Jan–Mar remained locked as actuals.")
+    # build display
+    def section_totals(df_total: pd.DataFrame):
+        res = {m:{} for m in MONTHS}
+        for sec,_ in SECTIONS:
+            mask = (df_total["Component"]=="TOTAL") & (df_total["Section"]==sec)
+            for m in MONTHS:
+                res[m][sec] = float(df_total.loc[mask, m].sum())
+        return res
+
+    def computed_lines(sec_map):
+        out = {}
+        out["Gross Profit"]     = sec_map.get("Revenue",0.0) - sec_map.get("COGS",0.0)
+        out["Operating Income"] = out["Gross Profit"] - sec_map.get("Opex",0.0)
+        out["Pre-Tax Income"]   = out["Operating Income"] + sec_map.get("Other",0.0)
+        out["Net Income"]       = out["Pre-Tax Income"] - sec_map.get("Taxes",0.0)
+        return out
+
+    if "expanded" not in st.session_state:
+        st.session_state["expanded"] = {sec: True for sec,_ in SECTIONS}
+    expanded = st.session_state["expanded"]
+
+    with st.sidebar:
+        st.header("Expand/Collapse")
+        c1,c2 = st.columns(2)
+        if c1.button("Expand all"):  expanded = {sec:True for sec,_ in SECTIONS}
+        if c2.button("Collapse all"):expanded = {sec:False for sec,_ in SECTIONS}
+        for sec,_ in SECTIONS:
+            expanded[sec] = st.toggle(sec, value=expanded[sec], key=f"exp_{sec}")
+
+    def build_display(df: pd.DataFrame, expanded_map: Dict[str,bool]) -> pd.DataFrame:
+        df = recalc(df)
+        rows=[]
+        sec_sub = section_totals(df[df.Component=="TOTAL"])
+        for sec, accounts in SECTIONS:
+            parent = {"Indent":0, "RowType":"PARENT", "Line": sec}
+            for m in MONTHS:
+                parent[m] = float(sec_sub[m].get(sec,0.0))
+            rows.append(parent)
+            if expanded_map.get(sec, True):
+                for acc in accounts:
+                    # TOTAL
+                    total_row = {"Indent":1, "RowType":"LEAF_TOTAL", "Line": acc}
+                    mask_tot = (df.Account==acc)&(df.Component=="TOTAL")
+                    for m in MONTHS: total_row[m] = float(df.loc[mask_tot, m].sum())
+                    rows.append(total_row)
+                    # CALC
+                    calc_row  = {"Indent":2, "RowType":"LEAF_CALC", "Line": f"{acc} · CALC"}
+                    mask_calc = (df.Account==acc)&(df.Component=="CALC")
+                    for m in MONTHS: calc_row[m] = float(df.loc[mask_calc, m].sum())
+                    rows.append(calc_row)
+                    # ADJ
+                    adj_row   = {"Indent":2, "RowType":"LEAF_ADJ", "Line": f"{acc} · ADJ"}
+                    mask_adj  = (df.Account==acc)&(df.Component=="MANUAL_ADJ")
+                    for m in MONTHS: adj_row[m] = float(df.loc[mask_adj, m].sum())
+                    rows.append(adj_row)
+        # computed bottom
+        for name in ["Gross Profit","Operating Income","Pre-Tax Income","Net Income"]:
+            row = {"Indent":0, "RowType":"COMPUTED", "Line": name}
+            for m in MONTHS:
+                sec_map = { s: float(df[(df.Component=="TOTAL")&(df.Section==s)][m].sum()) for s,_ in SECTIONS }
+                row[m] = computed_lines(sec_map)[name]
+            rows.append(row)
+        disp = pd.DataFrame(rows)
+        def label(r):
+            bullet = ">> " if r["RowType"]=="PARENT" else ("  " * r["Indent"] + "- ")
+            return ("  " * r["Indent"]) + bullet + r["Line"]
+        disp["Account"] = disp.apply(label, axis=1)
+        return disp[["Account"] + MONTHS + ["RowType","Line","Indent"]]
+
+    display_df = build_display(cube, expanded)
+
+    # lock months up to cutoff
+    col_cfg = {}
+    for m in MONTHS:
+        if m in locked_set:
+            col_cfg[m] = st.column_config.NumberColumn(disabled=True)
+        else:
+            col_cfg[m] = st.column_config.NumberColumn()
+
+    edited = st.data_editor(
+        display_df, use_container_width=True, num_rows="fixed", hide_index=True, column_config=col_cfg
+    )
+
+    def apply_edits(original: pd.DataFrame, before_disp: pd.DataFrame, after_disp: pd.DataFrame) -> pd.DataFrame:
+        df = original.copy()
+        for idx in range(len(after_disp)):
+            rt = after_disp.loc[idx, "RowType"]
+            label = after_disp.loc[idx, "Line"]
+            if rt not in ("LEAF_CALC","LEAF_ADJ"):
+                continue
+            if rt == "LEAF_CALC":
+                acc = label.replace(" · CALC","")
+                comp = "CALC"
+            else:
+                acc = label.replace(" · ADJ","")
+                comp = "MANUAL_ADJ"
+            for m in MONTHS:
+                if m in locked_set:  # keep actuals
+                    continue
+                val = after_disp.loc[idx, m]
+                if pd.isna(val): val = before_disp.loc[idx, m]
+                df.loc[(df.Account==acc)&(df.Component==comp), m] = float(val)
+        return df
+
+    if st.button("Recalculate & Save", type="primary"):
+        updated = apply_edits(cube, display_df, edited)
+        updated = recalc(updated)
+        st.session_state["cube"] = updated
+        st.success("Recalculated. Parents & computed updated.")
+
+else:
+    st.info("Upload a CSV to begin. Expect columns for Account, Period (month), Value, and optional Entity/Product/Channel/Currency.")
