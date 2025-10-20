@@ -1,0 +1,76 @@
+Entity,Product,Channel,Currency,Account,Period,Value
+US,Magazine,Magazine,USD,Sales,Jan,130000
+US,Magazine,Magazine,USD,Sales,Feb,132000
+US,Magazine,Magazine,USD,Sales,Mar,131000
+US,Magazine,Magazine,USD,Sales,Apr,134000
+US,Magazine,Magazine,USD,Sales,May,138000
+US,Magazine,Magazine,USD,Sales,Jun,142000
+US,Magazine,Magazine,USD,Sales,Jul,146000
+US,Magazine,Magazine,USD,Sales,Aug,149000
+US,Magazine,Magazine,USD,Sales,Sep,145000
+US,Magazine,Magazine,USD,Sales,Oct,139000
+US,Magazine,Magazine,USD,Sales,Nov,132000
+US,Magazine,Magazine,USD,Sales,Dec,125000
+US,Magazine,Magazine,USD,Returns & Allowances,Jan,-2600
+US,Magazine,Magazine,USD,Returns & Allowances,Feb,-2640
+US,Magazine,Magazine,USD,Returns & Allowances,Mar,-2620
+US,Magazine,Magazine,USD,Royalty Income,Jan,3250
+US,Magazine,Magazine,USD,Royalty Income,Feb,3300
+US,Magazine,Magazine,USD,Royalty Income,Mar,3275
+US,Magazine,Magazine,USD,COGS,Jan,-59800
+US,Magazine,Magazine,USD,COGS,Feb,-60700
+US,Magazine,Magazine,USD,COGS,Mar,-60300
+US,Magazine,Magazine,USD,Freight,Jan,-9100
+US,Magazine,Magazine,USD,Freight,Feb,-9200
+US,Magazine,Magazine,USD,Freight,Mar,-9150
+US,Magazine,Magazine,USD,Fulfillment,Jan,-5200
+US,Magazine,Magazine,USD,Fulfillment,Feb,-5300
+US,Magazine,Magazine,USD,Fulfillment,Mar,-5250
+US,Magazine,Magazine,USD,Marketing,Jan,-7800
+US,Magazine,Magazine,USD,Marketing,Feb,-7920
+US,Magazine,Magazine,USD,Marketing,Mar,-7860
+US,Magazine,Magazine,USD,Payroll,Jan,-13500
+US,Magazine,Magazine,USD,Payroll,Feb,-13600
+US,Magazine,Magazine,USD,Payroll,Mar,-13700
+US,Magazine,Magazine,USD,G&A,Jan,-6500
+US,Magazine,Magazine,USD,G&A,Feb,-6550
+US,Magazine,Magazine,USD,G&A,Mar,-6600
+US,Magazine,Magazine,USD,Depreciation,Jan,-1500
+US,Magazine,Magazine,USD,Depreciation,Feb,-1500
+US,Magazine,Magazine,USD,Depreciation,Mar,-1500
+US,Magazine,Magazine,USD,Other Income,Jan,900
+US,Magazine,Magazine,USD,Other Income,Feb,900
+US,Magazine,Magazine,USD,Other Income,Mar,900
+US,Magazine,Magazine,USD,Interest Expense,Jan,-4000
+US,Magazine,Magazine,USD,Interest Expense,Feb,-4000
+US,Magazine,Magazine,USD,Interest Expense,Mar,-4000
+US,Magazine,Magazine,USD,Taxes,Jan,-3600
+US,Magazine,Magazine,USD,Taxes,Feb,-3650
+US,Magazine,Magazine,USD,Taxes,Mar,-3625
+US,Digital,Online,USD,Sales,Jan,95000
+US,Digital,Online,USD,Sales,Feb,97000
+US,Digital,Online,USD,Sales,Mar,96000
+US,Digital,Online,USD,Marketing,Jan,-9000
+US,Digital,Online,USD,Marketing,Feb,-9100
+US,Digital,Online,USD,Marketing,Mar,-9050
+US,Digital,Online,USD,COGS,Jan,-30000
+US,Digital,Online,USD,COGS,Feb,-30500
+US,Digital,Online,USD,COGS,Mar,-30250
+US,Digital,Online,USD,Fulfillment,Jan,-800
+US,Digital,Online,USD,Fulfillment,Feb,-820
+US,Digital,Online,USD,Fulfillment,Mar,-810
+CA,Book,Wholesale,CAD,Sales,Jan,92000
+CA,Book,Wholesale,CAD,Sales,Feb,93000
+CA,Book,Wholesale,CAD,Sales,Mar,92500
+CA,Book,Wholesale,CAD,COGS,Jan,-42000
+CA,Book,Wholesale,CAD,COGS,Feb,-43000
+CA,Book,Wholesale,CAD,COGS,Mar,-42500
+CA,Book,Wholesale,CAD,Freight,Jan,-3000
+CA,Book,Wholesale,CAD,Freight,Feb,-3050
+CA,Book,Wholesale,CAD,Freight,Mar,-3025
+CA,Book,Wholesale,CAD,Payroll,Jan,-8200
+CA,Book,Wholesale,CAD,Payroll,Feb,-8250
+CA,Book,Wholesale,CAD,Payroll,Mar,-8300
+CA,Book,Wholesale,CAD,Taxes,Jan,-2400
+CA,Book,Wholesale,CAD,Taxes,Feb,-2450
+CA,Book,Wholesale,CAD,Taxes,Mar,-2425

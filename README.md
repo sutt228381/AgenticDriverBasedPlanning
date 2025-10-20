@@ -1,15 +1,11 @@
-# Agentic Driver-Based Planning — v13
-**Upload a CSV → Slice by dimensions → Hierarchical P&L with months across → Driver suggestions.**
+# v13 TEST (Auto Sample)
+This test build autoloads a realistic sample so you can see the UI immediately.
+You can still upload your own CSV in-app to override the sample.
 
-## CSV expectations
-- Required: Account, Period (month name/number), Value
-- Optional: Entity, Product, Channel, Currency
-- Period is normalized (Jan/1/01/january → Jan, etc.)
+### Sample schema
+```
+Entity,Product,Channel,Currency,Account,Period,Value
+...
+```
 
-## Run locally
-python3 -m pip install -r requirements.txt
-python3 -m streamlit run app.py
-
-## Deploy (Streamlit Cloud)
-- Main file: `app.py`
-- Python: 3.12.5 (runtime.txt included)
+The embedded sample is a subset of the extended file you generated earlier.
