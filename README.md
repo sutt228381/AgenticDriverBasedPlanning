@@ -1,8 +1,8 @@
-# Agentic Driver-Based Planning — Hierarchical P&L (No-AgGrid Stable)
+# Agentic Driver-Based Planning — P&L Grid v9.3 (No-AgGrid Stable)
 - Single-grid hierarchical P&L
 - Jan–Mar actuals locked; Apr–Dec editable
-- SUBTOTAL & COMPUTED read-only; LINE TOTAL auto = CALC + MANUAL_ADJ
-- Uses Streamlit's built-in editor (no aggrid)
+- SUBTOTAL & COMPUTED read-only; LINE TOTAL = CALC + MANUAL_ADJ
+- Uses Streamlit's built-in editor (no AgGrid dependency)
 
 ## Local
 python3 -m pip install -r requirements.txt

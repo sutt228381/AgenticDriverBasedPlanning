@@ -4,7 +4,7 @@ import streamlit as st
 from dataclasses import dataclass
 from typing import Tuple, Optional
 
-APP_TITLE = "Agentic Driver-Based Planning — P&L Grid (No-AgGrid Stable)"
+APP_TITLE = "Agentic Driver-Based Planning — P&L Grid v9.3 (No-AgGrid Stable)"
 DEFAULT_ENTITY = "Orvis"
 DEFAULT_CURRENCY = "USD"
 
@@ -159,6 +159,7 @@ def recalc(df_long: pd.DataFrame, prior_df: pd.DataFrame, ctx: Ctx, actuals_pivo
         try: return float(py.loc[("Sales","Revenue"), period])
         except Exception: return 0.0
 
+    # 1) CALC
     mask_calc=(df["RowType"]=="LINE")&(df["Component"]=="CALC")
     for idx,row in df[mask_calc].iterrows():
         acc=row["Account"]; typ=row["Type"]; per=row["Period"]
@@ -187,25 +188,29 @@ def recalc(df_long: pd.DataFrame, prior_df: pd.DataFrame, ctx: Ctx, actuals_pivo
         elif drv=="FX_CONVERTED_SALES":  df.at[idx,"Value"]=param*ctx.fx_eur_to_target
         else:                             df.at[idx,"Value"]=py_val
 
+    # 2) TOTAL = CALC + MANUAL_ADJ
     for (acc,typ,per), sub in df[df["RowType"]=="LINE"].groupby(["Account","Type","Period"]):
         calc=float(sub.loc[sub["Component"]=="CALC","Value"].sum()) if (sub["Component"]=="CALC").any() else 0.0
         adj =float(sub.loc[sub["Component"]=="MANUAL_ADJ","Value"].sum()) if (sub["Component"]=="MANUAL_ADJ").any() else 0.0
         df.loc[(df["RowType"]=="LINE")&(df["Account"]==acc)&(df["Type"]==typ)&(df["Component"]=="TOTAL")&(df["Period"]==per),"Value"]=calc+adj
 
+    # 3) SUBTOTAL by section
     for sec in ACCOUNT_TYPES:
         for m in MONTHS:
             subtotal=float(df[(df["RowType"]=="LINE")&(df["Type"]==sec)&(df["Component"]=="TOTAL")&(df["Period"]==m)]["Value"].sum())
             df.loc[(df["RowType"]=="SUBTOTAL")&(df["Type"]==sec)&(df["Period"]==m),"Value"]=subtotal
 
+    # 4) COMPUTED lines
     for m in MONTHS:
         sec = { t: float(df[(df["RowType"]=="SUBTOTAL")&(df["Type"]==t)&(df["Period"]==m)]["Value"].sum()) for t in ACCOUNT_TYPES }
-        for name, formula in COMPTED := [
+        computed_lines = [
             ("Gross Profit",    lambda sec: sec.get("Revenue",0) - sec.get("COGS",0)),
             ("EBITDA",          lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0)) - (sec.get("Opex",0) - 0.0)),
             ("Operating Income",lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0)) - sec.get("Opex",0)),
             ("Pre-Tax Income",  lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0) - sec.get("Opex",0)) + sec.get("Other",0)),
             ("Net Income",      lambda sec: (sec.get("Revenue",0)-sec.get("COGS",0) - sec.get("Opex",0) + sec.get("Other",0)) - sec.get("Taxes",0)),
-        ]:
+        ]
+        for name, formula in computed_lines:
             val=float(formula(sec))
             df.loc[(df["RowType"]=="COMPUTED")&(df["Account"]==name)&(df["Period"]==m),"Value"]=val
     return df
@@ -248,7 +253,6 @@ def build_display_df(unified_df: pd.DataFrame) -> pd.DataFrame:
         aggfunc="sum"
     ).reindex(columns=MONTHS, fill_value=0.0).reset_index()
 
-    # label with lightweight indentation markers
     def label_row(r):
         indent = "   " if r["RowType"] == "LINE" else ""
         base = f"{indent}{r['Account']}"
@@ -264,16 +268,13 @@ def build_display_df(unified_df: pd.DataFrame) -> pd.DataFrame:
     return wide[cols]
 
 st.subheader("Unified P&L Grid")
-
 display_df = build_display_df(unified)
 
-# Streamlit editor (no per-cell disable; we enforce locks on recalc)
 edited_df = st.data_editor(
     display_df,
     use_container_width=True,
     num_rows="dynamic",
     column_config={
-        # lock Jan–Mar by making them visually read-only (we'll also enforce on recalc)
         "Jan": st.column_config.NumberColumn(disabled=True),
         "Feb": st.column_config.NumberColumn(disabled=True),
         "Mar": st.column_config.NumberColumn(disabled=True),
@@ -295,23 +296,19 @@ if st.button("Recalculate", type="primary"):
     prev = st.session_state["unified"]
     join = ["Order","RowType","Type","Account","Component","Driver","Param","Period"]
 
-    # 1) Enforce Jan–Mar lock
     merged = long.merge(prev[join+["Value"]].rename(columns={"Value":"Prev"}), on=join, how="left")
     is_locked_month = merged["Period"].isin(ACTUALIZED_PERIODS)
     merged.loc[is_locked_month, "Value"] = merged.loc[is_locked_month, "Prev"].fillna(merged.loc[is_locked_month, "Value"])
     merged = merged.drop(columns=["Prev"])
 
-    # 2) Enforce read-only rows: SUBTOTAL, COMPUTED, LINE TOTAL
     ro_mask = (merged["RowType"].isin(["SUBTOTAL","COMPUTED"])) | ((merged["RowType"]=="LINE") & (merged["Component"]=="TOTAL"))
     merged = merged.merge(prev[join+["Value"]].rename(columns={"Value":"Prev2"}), on=join, how="left")
     merged.loc[ro_mask, "Value"] = merged.loc[ro_mask, "Prev2"].fillna(merged.loc[ro_mask, "Value"])
     merged = merged.drop(columns=["Prev2"])
 
-    # 3) Compute
     out = recalc(merged, prior_df, ctx, actuals_pivot)
     st.session_state["unified"] = out
 
-    # Rerun to refresh grid
     if hasattr(st, "rerun"):
         st.rerun()
     elif hasattr(st, "experimental_rerun"):
