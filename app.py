@@ -1,13 +1,14 @@
 import io
+import csv
 import math
 import streamlit as st
 import pandas as pd
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-st.set_page_config(page_title="Agentic Driver-Based Planning — v13.3", layout="wide")
+st.set_page_config(page_title="Agentic Driver-Based Planning — v13.3.1", layout="wide")
 
-APP_TITLE = "Agentic Driver-Based Planning — v13.3 (Simple UI • Per-Combo Drivers)"
+APP_TITLE = "Agentic Driver-Based Planning — v13.3.1 (Simple UI • Per-Combo Drivers)"
 MONTHS: List[str] = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
 # ---------------- Hierarchy ----------------
@@ -74,39 +75,89 @@ def computed_lines(sec_map):
 
 # ---------------- Header ----------------
 st.title(APP_TITLE)
-st.caption("Upload → Map → Slice → Choose drivers per Account × Channel × Product → Apply to forecast months. Simple, clear, and explainable.")
+st.caption("① Load Data → ② Drivers (suggest & select) → ③ Plan Grid (months across). Actuals lock by cutoff; drivers apply only to forecast months.")
 
 # ---------------- Tabs ----------------
 tab1, tab2, tab3 = st.tabs(["① Load Data", "② Drivers", "③ Plan Grid"])
 
 with tab1:
     st.subheader("Load a dimensional CSV")
-    uf = st.file_uploader("CSV file", type=["csv"])
+    uf = st.file_uploader("CSV file", type=["csv","txt"])
+    st.caption("Header should include: Entity, Product, Channel, Currency, Account, Period, Value")
+
+    def try_read_csv(file_bytes: bytes):
+        """Try multiple parse strategies with useful errors and delimiter detection."""
+        sample = file_bytes[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample.decode("utf-8", errors="ignore"))
+            guessed_sep = dialect.delimiter
+        except Exception:
+            guessed_sep = ","
+
+        attempts = []
+        for enc in ("utf-8", "utf-8-sig", "latin-1"):
+            for sep in (guessed_sep, ",", ";", "\t"):
+                for header in ("infer", None):
+                    try:
+                        df = pd.read_csv(
+                            io.BytesIO(file_bytes),
+                            sep=sep,
+                            encoding=enc,
+                            header=0 if header == "infer" else None,
+                            engine="python",
+                            on_bad_lines="skip",
+                        )
+                        if header is None:
+                            if df.shape[1] >= 7:
+                                df = df.iloc[:, :7]
+                                df.columns = ["Entity","Product","Channel","Currency","Account","Period","Value"]
+                        attempts.append(("OK", enc, sep, header))
+                        return df, (enc, sep, header), attempts
+                    except Exception as e:
+                        attempts.append((repr(e), enc, sep, header))
+                        continue
+        return None, None, attempts
+
     if uf is not None:
-        raw = pd.read_csv(uf)
-        st.write("Preview", raw.head())
-        cols = list(raw.columns)
-        col_account = st.selectbox("Account column", cols, index=cols.index("Account") if "Account" in cols else 0)
-        col_period  = st.selectbox("Period column", cols, index=cols.index("Period") if "Period" in cols else 0)
-        col_value   = st.selectbox("Value/Amount column", cols, index=cols.index("Value") if "Value" in cols else 0)
-        col_entity  = st.selectbox("Entity column", ["<none>"]+cols, index=(cols.index("Entity")+1) if "Entity" in cols else 0)
-        col_product = st.selectbox("Product column", ["<none>"]+cols, index=(cols.index("Product")+1) if "Product" in cols else 0)
-        col_channel = st.selectbox("Channel column", ["<none>"]+cols, index=(cols.index("Channel")+1) if "Channel" in cols else 0)
-        col_currency= st.selectbox("Currency column", ["<none>"]+cols, index=(cols.index("Currency")+1) if "Currency" in cols else 0)
+        st.info(f"Selected: **{uf.name}** · {(uf.size/1024):.1f} KB")
+        file_bytes = uf.read()
+        df, meta, attempts = try_read_csv(file_bytes)
 
-        df = raw.copy()
-        df["Account"] = df[col_account].astype(str).str.strip()
-        df["Period"]  = df[col_period].apply(norm_period)
-        df["Value"]   = pd.to_numeric(df[col_value], errors="coerce").fillna(0.0)
-        df["Entity"]  = raw[col_entity].astype(str) if col_entity!="<none>" else "All"
-        df["Product"] = raw[col_product].astype(str) if col_product!="<none>" else "All"
-        df["Channel"] = raw[col_channel].astype(str) if col_channel!="<none>" else "All"
-        df["Currency"]= raw[col_currency].astype(str) if col_currency!="<none>" else "USD"
-        df["Section"] = df["Account"].map(lambda a: ACCOUNT_TO_SECTION.get(a, "Opex"))
-        df = df[df["Period"].isin(MONTHS)].copy()
+        with st.expander("Diagnostics (CSV parsing)", expanded=False):
+            st.dataframe(pd.DataFrame(attempts, columns=["result","encoding","sep","header"]), use_container_width=True)
 
-        st.session_state["uploaded_df"] = df
-        st.success("Data loaded. Move to the Drivers tab.")
+        if df is None or df.empty:
+            st.error("Could not parse your file. Try saving as a comma-delimited CSV with a single header row.")
+        else:
+            expected = ["Entity","Product","Channel","Currency","Account","Period","Value"]
+            cols = list(df.columns)
+            if set(expected) - set(cols):
+                st.warning("Columns don’t match expected names — map them below.")
+                col_map = {}
+                for want in expected:
+                    col_map[want] = st.selectbox(f"Map to **{want}**", ["<none>"] + cols, index=(cols.index(want)+1) if want in cols else 0)
+                norm = pd.DataFrame()
+                for want in expected:
+                    pick = col_map[want]
+                    if pick == "<none>":
+                        st.error(f"Please map a column to **{want}**.")
+                        st.stop()
+                    norm[want] = df[pick]
+                df = norm
+
+            # Normalize
+            df["Entity"]   = df["Entity"].astype(str).str.strip()
+            df["Product"]  = df["Product"].astype(str).str.strip()
+            df["Channel"]  = df["Channel"].astype(str).str.strip()
+            df["Currency"] = df["Currency"].astype(str).str.strip()
+            df["Account"]  = df["Account"].astype(str).str.strip()
+            df["Period"]   = df["Period"].apply(norm_period)
+            df["Value"]    = pd.to_numeric(df["Value"], errors="coerce").fillna(0.0)
+            df = df[df["Period"].isin(MONTHS)].copy()
+
+            df["Section"] = df["Account"].map(lambda a: ACCOUNT_TO_SECTION.get(a, "Opex"))
+            st.session_state["uploaded_df"] = df
+            st.success(f"Parsed OK (encoding/sep/header = {meta}). Rows: {len(df):,}. Go to tab ② Drivers.")
 
 with tab2:
     if "uploaded_df" not in st.session_state:
@@ -169,6 +220,8 @@ with tab2:
             return ("MANUAL", 0.4, "No strong signal; manual/bespoke driver.")
 
         combos = combo_cube[combo_cube["Account"].isin(KNOWN_ACCOUNTS)][["Account","Channel","Product"]].drop_duplicates().reset_index(drop=True)
+        if len(combos)==0:
+            st.warning("No known account rows found in this slice. Ensure your Accounts match the hierarchy names.")
         combos["Suggested"], combos["Confidence"], combos["Why"] = zip(*combos.apply(lambda r: suggest(r["Account"], r["Channel"], r["Product"]), axis=1))
 
         # Persist config
