@@ -1,8 +1,2 @@
-# Agentic Driver-Based Planning v13.2
-CSV ingestion + dimensional filters + months-across hierarchical P&L
-**plus per-combination driver selection & application** (CALC for forecast months).
-
-- Build a config table for Account × Channel × Product
-- Suggested drivers (heuristics), editable Driver + Param
-- Apply to CALC for months after the actuals cutoff (Jan–Mar by default)
-- Manual grid edits still supported
+# Agentic Driver-Based Planning — v13.3
+Simplified three-tab UI. Per-combo (Account×Channel×Product) driver suggestions with confidence and 'why', accept-all, and apply to forecast months. Plan Grid shows months across; manual edits are apportioned back to combos by share.
