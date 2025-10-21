@@ -1,11 +1,8 @@
-# v13 TEST (Auto Sample)
-This test build autoloads a realistic sample so you can see the UI immediately.
-You can still upload your own CSV in-app to override the sample.
+# Agentic Driver-Based Planning v13.2
+CSV ingestion + dimensional filters + months-across hierarchical P&L
+**plus per-combination driver selection & application** (CALC for forecast months).
 
-### Sample schema
-```
-Entity,Product,Channel,Currency,Account,Period,Value
-...
-```
-
-The embedded sample is a subset of the extended file you generated earlier.
+- Build a config table for Account × Channel × Product
+- Suggested drivers (heuristics), editable Driver + Param
+- Apply to CALC for months after the actuals cutoff (Jan–Mar by default)
+- Manual grid edits still supported
