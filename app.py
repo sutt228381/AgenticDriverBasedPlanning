@@ -1,15 +1,19 @@
-import io
-import csv
-import math
+import io, os, csv, json
 import streamlit as st
 import pandas as pd
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
+from pathlib import Path
 
-st.set_page_config(page_title="Agentic Driver-Based Planning — v13.3.1", layout="wide")
+st.set_page_config(page_title="Agentic Driver-Based Planning — v14", layout="wide")
 
-APP_TITLE = "Agentic Driver-Based Planning — v13.3.1 (Simple UI • Per-Combo Drivers)"
+APP_TITLE = "Agentic Driver-Based Planning — v14 (Agents + Scenarios)"
 MONTHS: List[str] = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
+DATA_DIR = Path("data")
+SCN_DIR = DATA_DIR / "scenarios"
+RES_DIR = DATA_DIR / "scenario_results"
+SIG_DIR = DATA_DIR / "signals"
 
 # ---------------- Hierarchy ----------------
 SECTIONS = [
@@ -73,12 +77,18 @@ def computed_lines(sec_map):
     out["Net Income"]       = out["Pre-Tax Income"] - sec_map.get("Taxes",0.0)
     return out
 
+def ensure_dirs():
+    for p in [DATA_DIR, SCN_DIR, RES_DIR, SIG_DIR, DATA_DIR / "uploaded"]:
+        p.mkdir(parents=True, exist_ok=True)
+
+ensure_dirs()
+
 # ---------------- Header ----------------
 st.title(APP_TITLE)
-st.caption("① Load Data → ② Drivers (suggest & select) → ③ Plan Grid (months across). Actuals lock by cutoff; drivers apply only to forecast months.")
+st.caption("Tabs: ① Load Data → ② Drivers → ③ Plan Grid → ④ Scenarios (Agents) → ⑤ Compare")
 
 # ---------------- Tabs ----------------
-tab1, tab2, tab3 = st.tabs(["① Load Data", "② Drivers", "③ Plan Grid"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["① Load Data", "② Drivers", "③ Plan Grid", "④ Scenarios", "⑤ Compare"])
 
 with tab1:
     st.subheader("Load a dimensional CSV")
@@ -86,7 +96,6 @@ with tab1:
     st.caption("Header should include: Entity, Product, Channel, Currency, Account, Period, Value")
 
     def try_read_csv(file_bytes: bytes):
-        """Try multiple parse strategies with useful errors and delimiter detection."""
         sample = file_bytes[:4096]
         try:
             dialect = csv.Sniffer().sniff(sample.decode("utf-8", errors="ignore"))
@@ -96,7 +105,7 @@ with tab1:
 
         attempts = []
         for enc in ("utf-8", "utf-8-sig", "latin-1"):
-            for sep in (guessed_sep, ",", ";", "\t"):
+            for sep in (guessed_sep, ",", ";", "\\t"):
                 for header in ("infer", None):
                     try:
                         df = pd.read_csv(
@@ -145,7 +154,6 @@ with tab1:
                     norm[want] = df[pick]
                 df = norm
 
-            # Normalize
             df["Entity"]   = df["Entity"].astype(str).str.strip()
             df["Product"]  = df["Product"].astype(str).str.strip()
             df["Channel"]  = df["Channel"].astype(str).str.strip()
@@ -154,9 +162,9 @@ with tab1:
             df["Period"]   = df["Period"].apply(norm_period)
             df["Value"]    = pd.to_numeric(df["Value"], errors="coerce").fillna(0.0)
             df = df[df["Period"].isin(MONTHS)].copy()
-
             df["Section"] = df["Account"].map(lambda a: ACCOUNT_TO_SECTION.get(a, "Opex"))
             st.session_state["uploaded_df"] = df
+            df.to_parquet(DATA_DIR / "uploaded" / "current.parquet")
             st.success(f"Parsed OK (encoding/sep/header = {meta}). Rows: {len(df):,}. Go to tab ② Drivers.")
 
 with tab2:
@@ -164,7 +172,6 @@ with tab2:
         st.info("Load a CSV in tab ① first.")
     else:
         src = st.session_state["uploaded_df"]
-
         st.subheader("Slice & Actuals")
         c1,c2,c3,c4 = st.columns(4)
         with c1:
@@ -175,11 +182,9 @@ with tab2:
             chan= st.multiselect("Channel", sorted(src["Channel"].unique().tolist()), default=sorted(src["Channel"].unique().tolist()))
         with c4:
             cutoff = st.selectbox("Actuals cutoff (locked)", MONTHS, index=2)
-        locked_set = set(MONTHS[:MONTHS.index(cutoff)+1])
+        st.session_state["_globals"] = {"cutoff": cutoff, "cpi": 0.02, "oil": 1.00, "fx": 1.05}
 
         sliced = src[src["Entity"].isin(ent) & src["Product"].isin(prod) & src["Channel"].isin(chan)].copy()
-
-        # Build combo cube at (Section, Account, Channel, Product, Component)
         by_combo = sliced.pivot_table(index=["Section","Account","Channel","Product"],
                                       columns="Period", values="Value", aggfunc="sum").reindex(columns=MONTHS, fill_value=0.0)
 
@@ -195,14 +200,10 @@ with tab2:
 
         if "combo_cube" not in st.session_state:
             st.session_state["combo_cube"] = seed_cube_from_combo(by_combo)
-
         combo_cube = st.session_state["combo_cube"]
 
-        # Driver suggestions per combo with confidence & why
-        st.subheader("Choose drivers per combo")
-        st.caption("We recommend a driver (with confidence and 'why'). Accept all or adjust per row, then Apply.")
         def suggest(acc:str, channel:str, product:str)->Tuple[str,float,str]:
-            a=acc.lower(); ch=str(channel).lower(); pr=str(product).lower()
+            a=acc.lower(); ch=str(channel).lower()
             if "freight" in a or "postage" in a or ch in ("magazine","catalog"):
                 return ("OIL_LINKED_FREIGHT", 0.8, "Shipping/postage sensitive by channel/account.")
             if a in ("payroll","g&a","general & administrative") or "salary" in a:
@@ -224,7 +225,6 @@ with tab2:
             st.warning("No known account rows found in this slice. Ensure your Accounts match the hierarchy names.")
         combos["Suggested"], combos["Confidence"], combos["Why"] = zip(*combos.apply(lambda r: suggest(r["Account"], r["Channel"], r["Product"]), axis=1))
 
-        # Persist config
         if "driver_cfg" not in st.session_state:
             cfg = combos.copy()
             cfg["Driver"] = cfg["Suggested"]
@@ -232,7 +232,7 @@ with tab2:
             st.session_state["driver_cfg"] = cfg
         else:
             prev = st.session_state["driver_cfg"]
-            cfg = pd.merge(combos, prev[["Account","Channel","Product","Driver","Param"]],
+            cfg = pd.merge(combos, prev["Account Channel Product Driver Param".split()],
                            on=["Account","Channel","Product"], how="left")
             cfg["Driver"] = cfg["Driver"].fillna(cfg["Suggested"])
             cfg["Param"]  = cfg["Param"].fillna(0.0)
@@ -261,70 +261,6 @@ with tab2:
         )
         st.session_state["driver_cfg"] = edited_cfg
 
-        st.subheader("Global assumptions")
-        c1,c2,c3,c4 = st.columns(4)
-        with c1: cutoff = st.selectbox("Actuals cutoff", MONTHS, index=2, key="cutoff2")
-        with c2: cpi_yoy = st.number_input("CPI YoY", value=0.02, step=0.005, format="%.3f")
-        with c3: oil_idx = st.number_input("Oil/Postage index", value=1.00, step=0.05, format="%.2f")
-        with c4: fx_rate = st.number_input("FX rate", value=1.05, step=0.01, format="%.2f")
-        st.session_state["_globals"] = {"cutoff": cutoff, "cpi": cpi_yoy, "oil": oil_idx, "fx": fx_rate}
-
-        def apply_drivers_per_combo(cube_df: pd.DataFrame, cfg_df: pd.DataFrame) -> pd.DataFrame:
-            df = cube_df.copy()
-            cutoff_idx = MONTHS.index(cutoff)
-            # Ensure Sales TOTAL per combo
-            for m in MONTHS:
-                df.loc[(df["Account"]=="Sales")&(df["Component"]=="TOTAL"), m] = (
-                    df.loc[(df["Account"]=="Sales")&(df["Component"]=="CALC"), m].values +
-                    df.loc[(df["Account"]=="Sales")&(df["Component"]=="MANUAL_ADJ"), m].values
-                )
-            # Q1 ratio cache
-            def q1_ratio(account:str, ch:str, pr:str)->float:
-                acc_q1 = sum(float(df[(df["Account"]==account)&(df["Channel"]==ch)&(df["Product"]==pr)&(df["Component"]=="CALC")][m].sum()) for m in MONTHS[:3])
-                sales_q1 = sum(float(df[(df["Account"]=="Sales")&(df["Channel"]==ch)&(df["Product"]==pr)&(df["Component"]=="CALC")][m].sum()) for m in MONTHS[:3])
-                return (acc_q1 / sales_q1) if sales_q1 else 0.0
-            ratio_cache: Dict[Tuple[str,str,str], float] = {}
-
-            for _, r in cfg_df.iterrows():
-                acc, ch, pr = r["Account"], r["Channel"], r["Product"]
-                drv = str(r.get("Driver","MANUAL")).upper()
-                prm = float(r.get("Param", 0.0))
-                mask_calc = (df["Account"]==acc)&(df["Channel"]==ch)&(df["Product"]==pr)&(df["Component"]=="CALC")
-                for idx, m in enumerate(MONTHS):
-                    if idx <= cutoff_idx: continue
-                    prev_m = MONTHS[idx-1] if idx>0 else m
-                    prev_val = float(df.loc[mask_calc, prev_m].sum())
-                    sales_m = float(df[(df["Account"]=="Sales")&(df["Channel"]==ch)&(df["Product"]==pr)&(df["Component"]=="TOTAL")][m].sum())
-                    val = prev_val
-                    if drv == "MANUAL":
-                        val = prev_val
-                    elif drv == "PCT_GROWTH":
-                        val = prev_val * (1.0 + prm)
-                    elif drv == "PCT_OF_SALES":
-                        val = sales_m * prm
-                    elif drv == "PY_RATIO_SALES":
-                        key=(acc,ch,pr)
-                        if key not in ratio_cache: ratio_cache[key]= q1_ratio(acc,ch,pr)
-                        val = sales_m * ratio_cache[key] * (1.0 + prm)
-                    elif drv == "CPI_INDEXED":
-                        val = prev_val * (1.0 + cpi_yoy)
-                    elif drv == "OIL_LINKED_FREIGHT":
-                        val = sales_m * prm * oil_idx
-                    elif drv == "FX_CONVERTED_SALES":
-                        val = prev_val * fx_rate
-                    df.loc[mask_calc, m] = float(val)
-            # Recompute TOTAL
-            for m in MONTHS:
-                df.loc[df["Component"]=="TOTAL", m] = (
-                    df.loc[df["Component"]=="CALC", m].values + df.loc[df["Component"]=="MANUAL_ADJ", m].values
-                )
-            return df
-
-        if st.button("Apply drivers to forecast months"):
-            new_cube = apply_drivers_per_combo(combo_cube, st.session_state["driver_cfg"])
-            st.session_state["combo_cube"] = new_cube
-            st.success("Drivers applied per combo. See tab ③.")
-
 with tab3:
     if "uploaded_df" not in st.session_state or "combo_cube" not in st.session_state:
         st.info("Load data and set drivers first (tabs ① & ②).")
@@ -333,10 +269,8 @@ with tab3:
         locked_set = set(MONTHS[:MONTHS.index(cutoff)+1])
         combo_cube = st.session_state["combo_cube"]
 
-        # Aggregate for display
         agg = combo_cube.groupby(["Section","Account","Component"])[MONTHS].sum().reset_index()
 
-        # Helpers
         def recalc(df: pd.DataFrame)->pd.DataFrame:
             out = df.copy()
             for m in MONTHS:
@@ -369,15 +303,12 @@ with tab3:
                     adj={"Indent":2,"RowType":"LEAF_ADJ","Line":f"{acc} · ADJ"}
                     for m in MONTHS: adj[m]=float(df[(df.Account==acc)&(df.Component=="MANUAL_ADJ")][m].sum())
                     rows.append(adj)
-            # computed
-            def comp_row(name):
-                row={"Indent":0,"RowType":"COMPUTED","Line":name}
+            for nm in ["Gross Profit","Operating Income","Pre-Tax Income","Net Income"]:
+                row={"Indent":0,"RowType":"COMPUTED","Line":nm}
                 for m in MONTHS:
                     sec_map = { s: float(df[(df.Component=="TOTAL")&(df.Section==s)][m].sum()) for s,_ in SECTIONS }
-                    row[m]=computed_lines(sec_map)[name]
-                return row
-            for nm in ["Gross Profit","Operating Income","Pre-Tax Income","Net Income"]:
-                rows.append(comp_row(nm))
+                    row[m]=computed_lines(sec_map)[nm]
+                rows.append(row)
             disp=pd.DataFrame(rows)
             def label(r):
                 bullet = "» " if r["RowType"]=="PARENT" else ("  " * r["Indent"] + "- ")
@@ -390,12 +321,10 @@ with tab3:
         col_cfg = {m: st.column_config.NumberColumn(disabled=(m in locked_set)) for m in MONTHS}
         edited = st.data_editor(display_df, use_container_width=True, num_rows="fixed", hide_index=True, column_config=col_cfg)
 
-        # Manual edits apportioned back to combos by share of CALC
         if st.button("Save manual edits"):
             before = display_df
             after = edited
             updated = combo_cube.copy()
-            # shares
             shares = combo_cube[combo_cube["Component"]=="CALC"].groupby(["Account","Channel","Product"])[MONTHS].sum()
             acct_tot = shares.groupby(level=0)[MONTHS].sum()
             for idx in range(len(after)):
@@ -412,10 +341,166 @@ with tab3:
                             w = row[m] / acct_tot.loc[acc,m]
                             mask = (updated["Account"]==acc)&(updated["Channel"]==ch)&(updated["Product"]==pr)&(updated["Component"]==comp)
                             updated.loc[mask, m] = updated.loc[mask, m] + delta * float(w)
-            # recompute totals
             for m in MONTHS:
                 updated.loc[updated["Component"]=="TOTAL", m] = (
                     updated.loc[updated["Component"]=="CALC", m].values + updated.loc[updated["Component"]=="MANUAL_ADJ", m].values
                 )
             st.session_state["combo_cube"] = updated
             st.success("Saved edits and recomputed totals.")
+
+# ---------------- Agents ----------------
+def agent_profiler(combo_cube: pd.DataFrame) -> Dict[str, Any]:
+    q1 = ["Jan","Feb","Mar"]
+    stats = {}
+    sales = combo_cube[(combo_cube["Account"]=="Sales")&(combo_cube["Component"]=="CALC")]
+    for acc in combo_cube["Account"].unique():
+        if acc=="Sales": continue
+        acc_rows = combo_cube[(combo_cube["Account"]==acc)&(combo_cube["Component"]=="CALC")]
+        num = sum(float(acc_rows[m].sum()) for m in q1)
+        den = sum(float(sales[m].sum())    for m in q1)
+        stats[acc] = {"q1_ratio_sales": (num/den) if den else 0.0}
+    return {"stats": stats, "notes":"Computed Q1 ratios vs Sales."}
+
+def agent_driver_inference(stats: Dict[str, Any], existing_cfg: pd.DataFrame):
+    cfg = existing_cfg.copy()
+    notes = []
+    for i, r in cfg.iterrows():
+        acc = r["Account"]
+        s = stats.get(acc, {})
+        if abs(s.get("q1_ratio_sales", 0.0)) > 0.01 and r["Suggested"] != "PY_RATIO_SALES":
+            cfg.at[i, "Suggested"] = "PY_RATIO_SALES"
+            notes.append(f"{acc}: stable Q1 ratio -> PY_RATIO_SALES")
+    return cfg, notes
+
+def apply_drivers_per_combo(cube_df: pd.DataFrame, cfg_df: pd.DataFrame, cutoff: str, cpi: float, oil: float, fx: float) -> pd.DataFrame:
+    df = cube_df.copy()
+    cutoff_idx = MONTHS.index(cutoff)
+    for m in MONTHS:
+        df.loc[(df["Account"]=="Sales")&(df["Component"]=="TOTAL"), m] = (
+            df.loc[(df["Account"]=="Sales")&(df["Component"]=="CALC"), m].values +
+            df.loc[(df["Account"]=="Sales")&(df["Component"]=="MANUAL_ADJ"), m].values
+        )
+    def q1_ratio(account:str, ch:str, pr:str)->float:
+        acc_q1 = sum(float(df[(df["Account"]==account)&(df["Channel"]==ch)&(df["Product"]==pr)&(df["Component"]=="CALC")][m].sum()) for m in MONTHS[:3])
+        sales_q1 = sum(float(df[(df["Account"]=="Sales")&(df["Channel"]==ch)&(df["Product"]==pr)&(df["Component"]=="CALC")][m].sum()) for m in MONTHS[:3])
+        return (acc_q1 / sales_q1) if sales_q1 else 0.0
+    ratio_cache: Dict[Tuple[str,str,str], float] = {}
+    for _, r in cfg_df.iterrows():
+        acc, ch, pr = r["Account"], r["Channel"], r["Product"]
+        drv = str(r.get("Driver","MANUAL")).upper()
+        prm = float(r.get("Param", 0.0))
+        mask_calc = (df["Account"]==acc)&(df["Channel"]==ch)&(df["Product"]==pr)&(df["Component"]=="CALC")
+        for idx, m in enumerate(MONTHS):
+            if idx <= cutoff_idx: continue
+            prev_m = MONTHS[idx-1] if idx>0 else m
+            prev_val = float(df.loc[mask_calc, prev_m].sum())
+            sales_m = float(df[(df["Account"]=="Sales")&(df["Channel"]==ch)&(df["Product"]==pr)&(df["Component"]=="TOTAL")][m].sum())
+            val = prev_val
+            if drv == "MANUAL":
+                val = prev_val
+            elif drv == "PCT_GROWTH":
+                val = prev_val * (1.0 + prm)
+            elif drv == "PCT_OF_SALES":
+                val = sales_m * prm
+            elif drv == "PY_RATIO_SALES":
+                key=(acc,ch,pr)
+                if key not in ratio_cache: ratio_cache[key]= q1_ratio(acc,ch,pr)
+                val = sales_m * ratio_cache[key] * (1.0 + prm)
+            elif drv == "CPI_INDEXED":
+                val = prev_val * (1.0 + cpi)
+            elif drv == "OIL_LINKED_FREIGHT":
+                val = sales_m * prm * oil
+            elif drv == "FX_CONVERTED_SALES":
+                val = prev_val * fx
+            df.loc[mask_calc, m] = float(val)
+    for m in MONTHS:
+        df.loc[df["Component"]=="TOTAL", m] = (
+            df.loc[df["Component"]=="CALC", m].values + df.loc[df["Component"]=="MANUAL_ADJ", m].values
+        )
+    return df
+
+def aggregate_for_eval(cube: pd.DataFrame)->pd.DataFrame:
+    return cube.groupby(["Section","Account","Component"])[MONTHS].sum().reset_index()
+
+def kpi_metrics(agg: pd.DataFrame)->Dict[str, float]:
+    sales_total = sum(float(agg[(agg["Component"]=="TOTAL")&(agg["Account"]=="Sales")][m].sum()) for m in MONTHS)
+    cogs_total  = sum(float(agg[(agg["Component"]=="TOTAL")&(agg["Account"]=="COGS")][m].sum()) for m in MONTHS)
+    gp = sales_total - cogs_total
+    opx_total = sum(float(agg[(agg["Component"]=="TOTAL")&(agg["Section"]=="Opex")][m].sum()) for m in MONTHS)
+    other     = sum(float(agg[(agg["Component"]=="TOTAL")&(agg["Section"]=="Other")][m].sum()) for m in MONTHS)
+    taxes     = sum(float(agg[(agg["Component"]=="TOTAL")&(agg["Section"]=="Taxes")][m].sum()) for m in MONTHS)
+    op_inc = gp - opx_total
+    pre_tax = op_inc + other
+    ni = pre_tax - taxes
+    return {"Sales": sales_total, "COGS": cogs_total, "GrossProfit": gp, "OperatingIncome": op_inc, "PreTax": pre_tax, "NetIncome": ni, "GM%": (gp/sales_total if sales_total else 0.0)}
+
+with tab4:
+    st.subheader("Scenarios (Agent-driven)")
+    if "uploaded_df" not in st.session_state or "combo_cube" not in st.session_state or "driver_cfg" not in st.session_state:
+        st.info("Load data, configure drivers first (tabs ①–③).")
+    else:
+        glb = st.session_state.get("_globals", {"cutoff":"Mar","cpi":0.02,"oil":1.0,"fx":1.05})
+        st.write("Assumptions:", glb)
+
+        c1, c2 = st.columns([1,1])
+        with c1:
+            scn_name = st.text_input("Scenario name", value="Base Case")
+        with c2:
+            generate_bull_bear = st.checkbox("Also generate Bull/Bear variants", value=False)
+
+        if st.button("Run Agents & Save Scenario"):
+            combo_cube = st.session_state["combo_cube"]
+            prof = agent_profiler(combo_cube)
+            inferred_cfg, notes = agent_driver_inference(prof["stats"], st.session_state["driver_cfg"])
+            new_cube = apply_drivers_per_combo(combo_cube, st.session_state["driver_cfg"], glb["cutoff"], glb["cpi"], glb["oil"], glb["fx"])
+            agg = aggregate_for_eval(new_cube)
+            metrics = kpi_metrics(agg)
+
+            SCN_DIR.mkdir(parents=True, exist_ok=True); RES_DIR.mkdir(parents=True, exist_ok=True)
+            scn_id = f"scn_{pd.Timestamp.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            meta = {
+                "id": scn_id,
+                "name": scn_name,
+                "assumptions": glb,
+                "notes": notes,
+            }
+            with open(SCN_DIR / f"{scn_id}.json","w") as f:
+                json.dump(meta, f, indent=2)
+            new_cube.to_parquet(RES_DIR / f"{scn_id}.parquet")
+            st.session_state.setdefault("scenarios", {})[scn_id] = meta
+
+            st.success(f"Scenario saved: {scn_id}")
+            st.write("KPIs:", metrics)
+
+        st.divider()
+        st.subheader("Existing scenarios")
+        scn_files = sorted([p for p in SCN_DIR.glob("*.json")])
+        scn_list = []
+        for p in scn_files:
+            with open(p,"r") as f: scn_list.append(json.load(f))
+        if scn_list:
+            st.dataframe(pd.DataFrame(scn_list)[["id","name","assumptions"]], use_container_width=True)
+        else:
+            st.info("No scenarios saved yet.")
+
+with tab5:
+    st.subheader("Compare scenarios")
+    scn_files = sorted([p.stem for p in SCN_DIR.glob("*.json")])
+    if len(scn_files) < 2:
+        st.info("Create at least two scenarios in tab ④ to compare.")
+    else:
+        c1,c2 = st.columns(2)
+        with c1: a = st.selectbox("Scenario A", scn_files, index=0)
+        with c2: b = st.selectbox("Scenario B", scn_files, index=1 if len(scn_files)>1 else 0)
+
+        def load_metrics(scn_id: str)->Dict[str, float]:
+            df = pd.read_parquet(RES_DIR / f"{scn_id}.parquet")
+            agg = aggregate_for_eval(df)
+            return kpi_metrics(agg)
+
+        if st.button("Compare"):
+            ma = load_metrics(a); mb = load_metrics(b)
+            delta = {k: mb.get(k,0.0) - ma.get(k,0.0) for k in ma.keys()}
+            st.write("Scenario A KPIs:", ma)
+            st.write("Scenario B KPIs:", mb)
+            st.write("Δ (B - A):", delta)
